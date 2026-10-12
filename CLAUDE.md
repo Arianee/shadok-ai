@@ -220,7 +220,8 @@ also carries `model`, the per-agent model the agent menu shows/changes),
 `auto-retry-*`, `version`, `server-reload`, `gone`, `error`, `exited`,
 `stopped`. `error` carries an optional `code` — `"busy"` (prompt refused
 mid-turn), `"link-refused"` (a `set-parent` the server will not accept) or
-`"logged-out"` (a spawn refused because the instance is not signed in to Claude)
+`"logged-out"` (a spawn refused because the instance is not signed in to Claude) or
+`"resume-refused"` (a `resume` whose shortened id matches no agent, or several)
 — so a machine client can classify a refusal without matching on the message
 text.
 
@@ -1133,6 +1134,34 @@ Auth section of `docs/architecture.md`).
     `<system-reminder>` is still dropped. Not caught by `tsc`/most tests because
     the fixtures were small; it takes a prompt big enough to be paste-wrapped,
     which the default-on ledger now produces constantly.
+
+36. **A start that fails must take its watchers with it — and a short id is not a
+    session id.** One outage, three links, each survivable alone (2026-10-12).
+    **The id.** Ids are shown 8 characters long everywhere, so that is what a
+    caller hands back. `start` passed `msg.resume` verbatim, and
+    `claude --resume 113f3745` does not resume: it opens Claude Code's "Resume
+    session" PICKER — no prompt, no `❯` — in a pane named after the truncated id.
+    `resolveResumeId` (`src/channels.ts`) resolves a unique prefix against the
+    registry and refuses the rest (`error.code: "resume-refused"`), invariant
+    17's rule applied to sessions.
+    **The leak.** `pilot.start()` arms the pane poller before anyone knows the
+    TUI will come up. When `attachPilot`'s readiness wait timed out, the session
+    was never registered — so nothing ever stopped that poller, the 300 ms screen
+    timer or the tail. Every retry added a set. Two picker panes ended up taking
+    nine tmux captures in ten; the captures are synchronous, so the event loop was
+    saturated and `/version` took 4–8 s. `attachPilot` now tears down what it
+    armed and calls `pilot.abandon()`, which KILLS a pane this pilot created and
+    only stops watching one it ADOPTED — that one may be a live agent on a server
+    too slow to see it in time.
+    **The symptom, somewhere else entirely.** A slow server reads every paste as
+    late, so `typeIntoBox` ran its recovery on prompts that had landed fine — and
+    Ctrl-U clears ONE line, not the box (two lines take three presses). The
+    header line survived and the retry pasted after it: agents received
+    `⟦header⟧⟦header⟧` with no text, or nothing, for nine days, crons included.
+    The recovery now presses until the box reads clear. What made it hard to see:
+    the terminal view writes keys straight to the pane and kept working, the
+    wedged panes had no channel and were absent from `/live`, and nothing was
+    logged. Measure the server (`time curl /version`) before suspecting the page.
 
 ## Conventions
 

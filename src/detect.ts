@@ -314,6 +314,13 @@ export interface TypeOptions {
  * it was written twice (node-pty and tmux), and could only be exercised by
  * spawning a real process.
  */
+/** Upper bound on Ctrl-U presses for one recovery: a prompt is a handful of
+ *  lines, and a box that still is not clear after this many is not going to be. */
+const MAX_CLEARS = 40;
+/** How long one press is given to show. Above the tmux mirror's fast poll
+ *  (`SCREEN_FAST_MS`), or a press that worked would read as one that did not. */
+const CLEAR_STEP_MS = 400;
+
 export async function typeIntoBox(
   pilot: TypingPilot,
   text: string,
@@ -332,15 +339,29 @@ export async function typeIntoBox(
       return true;
     } catch {
       await delay(settleMs); // let a paste that is still in flight land
-      pilot.clearInput();
-      try {
-        await pilot.waitFor((s) => {
-          const now = inputText(s);
-          return now === "" || now === before;
-        }, { timeoutMs: clearMs });
-      } catch {
-        pilot.clearInput(); // stubborn — clear once more, then try again
-        await delay(settleMs);
+      const isClear = (s: string) => {
+        const now = inputText(s);
+        return now === "" || now === before;
+      };
+      // Ctrl-U clears ONE line, not the box (seen on 2.1.296): a two-line paste
+      // takes three presses — the last line, the newline, the first line. Two
+      // presses left the first line behind and the next attempt pasted after it,
+      // which is how a prompt arrived as its header twice and its text nowhere.
+      // So press until the box reads clear. Progress cannot be read off the box:
+      // `inputText` sees its FIRST line only, which stays put while the lines
+      // under it go. The whole screen is what moves, so a run of presses that
+      // leaves it untouched is a screen with nothing to clear — given up on, and
+      // left to the next attempt rather than pasted into blindly.
+      let stuck = 0;
+      for (let press = 0; press < MAX_CLEARS && stuck < 3; press++) {
+        const shown = pilot.screen();
+        pilot.clearInput();
+        try {
+          await pilot.waitFor(isClear, { timeoutMs: Math.min(clearMs, CLEAR_STEP_MS) });
+          break;
+        } catch {
+          stuck = pilot.screen() === shown ? stuck + 1 : 0;
+        }
       }
     }
   }

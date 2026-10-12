@@ -503,3 +503,34 @@ export function resumeTarget(
     repo: t.repo ?? sent.repo?.trim() ?? null,
   };
 }
+
+const FULL_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type ResumeLookup =
+  | { ok: true; id: string }
+  | { ok: false; error: "empty" | "not-found" | "ambiguous"; matches: number };
+
+/**
+ * The full session id a `resume` names — or an explicit refusal.
+ *
+ * Ids are displayed 8 characters long everywhere (pilotctl, the tab menu,
+ * Telegram), so that is what comes back from whoever read one. Passed through
+ * verbatim, `claude --resume 113f3745` does not resume anything: it opens Claude
+ * Code's "Resume session" PICKER, a screen with no prompt, in a pane named after
+ * the truncated id — an agent that never becomes ready and that no channel
+ * points at. Same family as `resolveCronId` (invariant 17): a short handle is
+ * resolved to exactly one id, and an empty or ambiguous one is refused rather
+ * than settled at random.
+ *
+ * A complete id is returned as it is even when the registry does not know it:
+ * `/recover` resumes sessions whose channel is long gone.
+ */
+export function resolveResumeId(known: string[], given: string): ResumeLookup {
+  const n = (given ?? "").trim();
+  if (!n) return { ok: false, error: "empty", matches: 0 };
+  if (known.includes(n) || FULL_SESSION_ID.test(n)) return { ok: true, id: n };
+  const hits = [...new Set(known.filter((id) => id.startsWith(n)))];
+  if (hits.length === 0) return { ok: false, error: "not-found", matches: 0 };
+  if (hits.length > 1) return { ok: false, error: "ambiguous", matches: hits.length };
+  return { ok: true, id: hits[0] };
+}

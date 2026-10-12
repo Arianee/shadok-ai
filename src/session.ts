@@ -310,6 +310,12 @@ export class PtyPilot {
   kill(): void {
     this.proc?.kill();
   }
+
+  /** Twin of `TmuxPilot.abandon`. A PTY dies with us and can never be adopted
+   *  again, so there is nothing to spare. */
+  abandon(): void {
+    this.kill();
+  }
 }
 
 function sleep(ms: number): Promise<void> {

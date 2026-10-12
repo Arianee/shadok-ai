@@ -683,7 +683,7 @@ client, or immediately on an explicit `stop` (which ends it for everyone).
 | `{type:"auto-retry"}` / `-cancelled` / `-gave-up` | transient API error being retried |
 | `{type:"version", …}` / `{type:"server-reload", version}` | update available / server updated, reload |
 | `{type:"term-data", data}` | **experimental** — raw pane output (base64) for a client-side terminal emulator |
-| `{type:"gone"}` / `{type:"error", message, code?}` / `{type:"exited", code}` / `{type:"stopped"}` | session lost, errors, termination. `error.code` is `"busy"` for a prompt refused mid-turn and `"logged-out"` for a spawn refused because the instance isn't signed in — so a machine client needn't match on the message text |
+| `{type:"gone"}` / `{type:"error", message, code?}` / `{type:"exited", code}` / `{type:"stopped"}` | session lost, errors, termination. `error.code` is `"busy"` for a prompt refused mid-turn and `"logged-out"` for a spawn refused because the instance isn't signed in, `"resume-refused"` for a `resume` whose shortened id matches no agent or several — so a machine client needn't match on the message text |
 
 HTTP endpoints (same auth): `/usage`, `/live`, `/sessions`, `/recover`,
 `/diff`, `/channels` (its GET adds a **derived** `crons` field — never stored),

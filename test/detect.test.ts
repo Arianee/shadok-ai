@@ -250,3 +250,44 @@ test("typeIntoBox: a hint that changes across a clear is not mistaken for the pa
   const p = fakeBox([null, null], { rest: HINT, restAfterClear: 'Try "how does <filepath> work?"' });
   assert.equal(await typeIntoBox(p, "HELLO", { ...FAST, attempts: 2 }), false);
 });
+
+// Claude Code's Ctrl-U clears ONE line (seen on 2.1.296): the text of the line
+// the cursor is on, then — pressed again on an empty line — the newline above.
+function lineBox(landDelays: number[]) {
+  const st = { box: "", pastes: 0, clears: 0 };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const render = () => "❯ " + st.box.split("\n").join("\n  ");
+  return {
+    st,
+    paste(text: string) {
+      const d = landDelays[st.pastes++] ?? 0;
+      if (d <= 0) st.box += text;
+      else setTimeout(() => (st.box += text), d);
+    },
+    clearInput() {
+      st.clears++;
+      const nl = st.box.lastIndexOf("\n");
+      st.box = nl === st.box.length - 1 ? st.box.slice(0, -1) : st.box.slice(0, nl + 1);
+    },
+    screen: render,
+    async waitFor(pred: (s: string) => boolean, opts?: { timeoutMs?: number }) {
+      const deadline = Date.now() + (opts?.timeoutMs ?? 1000);
+      while (Date.now() < deadline) {
+        if (pred(render())) return render();
+        await sleep(2);
+      }
+      throw new Error("timeout");
+    },
+  };
+}
+
+test("typeIntoBox: a slow MULTI-LINE paste is cleared whole before the retry", async () => {
+  // The 2026-10-12 outage: a saturated server read every paste as late, the
+  // recovery pressed Ctrl-U twice, the header line survived, and the retry
+  // pasted after it — "⟦header⟧⟦header⟧" reached the agent, the text did not.
+  const text = "⟦web · 2026-10-12 17:36 · admin⟧\ntu es la ?\nsecond line";
+  const p = lineBox([30, 0]);
+  const ok = await typeIntoBox(p, text, { appearMs: 15, settleMs: 45, clearMs: 20, attempts: 3 });
+  assert.equal(ok, true);
+  assert.equal(p.st.box, text); // one copy, nothing left over from the first
+});
