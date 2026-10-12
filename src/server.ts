@@ -70,6 +70,7 @@ import {
   isHomeChannel,
   homeAdoptionTarget,
   resolveSessionTarget,
+  resolveResumeId,
   resumeTarget,
   type Channel,
   type SessionTarget,
@@ -3303,13 +3304,28 @@ async function attachPilot(s: Live): Promise<void> {
   // the screen watcher above signals the running turn right after `settled`.
   const isUp = (scr: string) =>
     /do you trust the files/i.test(scr) || screenShowsWork(scr) || scr.includes("❯");
-  let screen = await pilot.waitFor(isUp, { timeoutMs: 60_000 });
-  if (/do you trust the files/i.test(screen)) {
-    pilot.press("enter");
-    screen = await pilot.waitFor(
-      (scr) => screenShowsWork(scr) || scr.includes("❯"),
-      { timeoutMs: 30_000 },
-    );
+  let screen: string;
+  try {
+    screen = await pilot.waitFor(isUp, { timeoutMs: 60_000 });
+    if (/do you trust the files/i.test(screen)) {
+      pilot.press("enter");
+      screen = await pilot.waitFor(
+        (scr) => screenShowsWork(scr) || scr.includes("❯"),
+        { timeoutMs: 30_000 },
+      );
+    }
+  } catch (e) {
+    // The TUI never came up. This session is never registered, so nothing else
+    // will ever tear down what was armed above — do it here, or each failed
+    // start leaves a pane poller, a 300 ms screen timer and a tail running
+    // until the server restarts. See `TmuxPilot.abandon`.
+    s.pilotOff?.();
+    if (s.screenTimer) clearInterval(s.screenTimer);
+    s.screenTimer = null;
+    s.stopTail?.();
+    s.stopTail = null;
+    pilot.abandon();
+    throw e;
   }
   // Resuming a large session shows a "resume from summary?" prompt. Keep the
   // FULL session as-is automatically (the machine may have slept mid-work; the
@@ -3720,7 +3736,17 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           const args: string[] = [];
           let resumed = false;
           if (msg.resume) {
-            id = msg.resume;
+            // A truncated id must never reach `claude --resume`: see
+            // `resolveResumeId` for the picker screen it lands on.
+            const found = resolveResumeId(loadChannels().map((c) => c.sessionId), msg.resume);
+            if (!found.ok)
+              return fail(
+                found.error === "ambiguous"
+                  ? `resume: "${msg.resume}" matches ${found.matches} agents — give more of the id`
+                  : `resume: no agent matches "${msg.resume}" — a shortened id only resolves against the agents this cockpit lists; pass the full session id`,
+                "resume-refused",
+              );
+            id = found.id;
             args.push("--resume", id);
             resumed = true;
           } else if (msg.continue) {

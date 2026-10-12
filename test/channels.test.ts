@@ -8,6 +8,7 @@ import {
   isMirrored,
   setToolKeys,
   resolveSessionTarget,
+  resolveResumeId,
   resumeTarget,
   channelWriteAllowed,
   dropForeignHomes,
@@ -381,4 +382,23 @@ test("resumeTarget: a known channel missing a field falls back to the caller's",
   assert.equal(t.cwd, "/wt");
   assert.equal(t.branch, "b");
   assert.equal(t.repo, "/r");
+});
+
+test("resolveResumeId: a shortened id resolves to the one agent it names", () => {
+  const known = ["113f3745-b8bc-4d73-b5c4-93b1557fb921", "a9900fc9-d0c3-4c5c-bb33-ef14aaeaaeee"];
+  assert.deepEqual(resolveResumeId(known, "113f3745"), { ok: true, id: known[0] });
+  assert.deepEqual(resolveResumeId(known, " a9900fc9 "), { ok: true, id: known[1] });
+});
+
+test("resolveResumeId: a shortened id nobody carries is refused, never passed to claude", () => {
+  // The 2026-10-12 outage began here: `claude --resume 113f3745` opens the
+  // "Resume session" picker instead of a session.
+  assert.deepEqual(resolveResumeId([], "113f3745"), { ok: false, error: "not-found", matches: 0 });
+  assert.deepEqual(resolveResumeId(["aa11", "aa22"], "aa"), { ok: false, error: "ambiguous", matches: 2 });
+  assert.deepEqual(resolveResumeId(["aa11"], "  "), { ok: false, error: "empty", matches: 0 });
+});
+
+test("resolveResumeId: a complete id is kept even when the registry has forgotten it", () => {
+  const id = "113f3745-b8bc-4d73-b5c4-93b1557fb921";
+  assert.deepEqual(resolveResumeId([], id), { ok: true, id }); // /recover
 });

@@ -599,6 +599,28 @@ export class TmuxPilot {
     this.kill(); // idempotent: killing an absent session is a no-op
   }
 
+  /**
+   * Let go of a pane that never became usable, without leaving a watcher behind.
+   *
+   * `start()` arms the poller before anyone knows whether the TUI will come up.
+   * When it does not, the caller's readiness wait throws — and nothing used to
+   * stop the poller, so every failed attempt left one capturing a dead screen
+   * for the life of the server. Two panes wedged on Claude Code's "Resume
+   * session" picker gathered enough of them to take nine captures in ten: the
+   * event loop was saturated, every request took seconds, and prompts to every
+   * OTHER agent were garbled or lost for nine days (2026-10-12).
+   *
+   * A pane we CREATED is killed: nobody will ever use it. One we ADOPTED is left
+   * alone — it may be a live agent on a server too slow to see it in time, and
+   * killing that on a timeout would turn a slow moment into lost work.
+   */
+  abandon(): void {
+    if (!this.attached) return this.kill();
+    if (this.poller) clearTimeout(this.poller);
+    this.poller = null;
+    this.exited = true;
+  }
+
   /** Kills the tmux session (ends the agent). */
   kill(): void {
     tmuxOk(["kill-session", "-t", this.name]);
