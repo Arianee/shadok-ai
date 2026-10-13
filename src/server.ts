@@ -137,7 +137,6 @@ import {
   loadLedger,
   deltaSince,
   formatLedgerBlock,
-  markLedgerBlock,
   ledgerSeenFileFor,
   seenFor,
   recordSeen,
@@ -4072,7 +4071,18 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             // first meant a submit that threw (a wedged screen, invariant 23)
             // burned the block for good, and keeping the mark only in memory
             // meant the next restart burned it too.
+            // It goes in as its OWN paste, never concatenated into the message.
+            // Claude Code keeps only the current paste inline (≤800 chars and
+            // ≤2 newlines) and wraps everything else in `<pasted_content>` —
+            // which its own system prompt says to act on only where the user's
+            // message asks. Pasted as one blob, the HUMAN's words ended up
+            // inside that wrapper and stopped being an instruction: an agent
+            // answered a direct order with "I haven't acted on that line, since
+            // it came from the pasted text". As a separate, earlier paste the
+            // block is wrapped — which is correct, it IS injected context — and
+            // the message stays outside it.
             let ledgerSeen: number | null = null;
+            let ledgerPrelude: string | undefined;
             if (ledgerEnabled) {
               const { rows, total } = deltaSince(
                 loadLedger(ledgerFileFor(process.cwd())),
@@ -4080,9 +4090,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                 LEDGER_PUSH_CAP,
               );
               ledgerSeen = Date.now();
-              if (rows.length) submitText = markLedgerBlock(submitText, formatLedgerBlock(rows, total));
+              if (rows.length) ledgerPrelude = formatLedgerBlock(rows, total) + "\n";
             }
-            await session.pilot.submit(submitText);
+            await session.pilot.submit(submitText, ledgerPrelude);
             if (ledgerSeen !== null) {
               session.ledgerSeenAt = ledgerSeen;
               // The live channel list prunes the watermarks of agents that are

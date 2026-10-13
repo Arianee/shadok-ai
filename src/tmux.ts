@@ -496,7 +496,7 @@ export class TmuxPilot {
    * bracketed paste with retry until the text shows, then Enter with retry
    * until the turn is actually sent.
    */
-  async submit(text: string): Promise<void> {
+  async submit(text: string, prelude?: string): Promise<void> {
     const typed = await typeIntoBox(
       {
         screen: () => this.freshScreen(),
@@ -505,6 +505,7 @@ export class TmuxPilot {
         waitFor: (p, o) => this.waitFor(p, o),
       },
       text,
+      { prelude },
     );
     if (!typed) {
       throw this.submitError("the text never appeared in the input box");

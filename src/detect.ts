@@ -276,6 +276,12 @@ export interface TypeOptions {
   settleMs?: number;
   /** How long to wait for the box to actually read empty after Ctrl-U. */
   clearMs?: number;
+  /**
+   * Injected context to put in the box BEFORE the message, as its own paste —
+   * not concatenated into it. See `typeIntoBox` for why that distinction is a
+   * correctness one.
+   */
+  prelude?: string;
 }
 
 /**
@@ -324,17 +330,41 @@ const CLEAR_STEP_MS = 400;
 export async function typeIntoBox(
   pilot: TypingPilot,
   text: string,
-  { attempts = 6, appearMs = 2_000, settleMs = 400, clearMs = 1_000 }: TypeOptions = {},
+  { attempts = 6, appearMs = 2_000, settleMs = 400, clearMs = 1_000, prelude }: TypeOptions = {},
 ): Promise<boolean> {
   for (let attempt = 0; attempt < attempts; attempt++) {
     // Only "" and the resting state count as an empty box; anything else the
     // box shows once we paste is our paste (whole, or collapsed).
     const before = inputText(pilot.screen());
+    if (prelude) {
+      // TWO pastes, and the second must be the message. Claude Code keeps only
+      // the CURRENT paste inline and leaves every earlier one collapsed, so
+      // pasting separately is what puts the injected context inside the
+      // `<pasted_content>` wrapper and leaves the user's words outside it.
+      // Waiting for the first to land is load-bearing: fired back to back they
+      // can reach the pane as one paste event, which is exactly the single
+      // blob this exists to stop being.
+      pilot.paste(prelude);
+      try {
+        await pilot.waitFor((s) => inputText(s) !== before, { timeoutMs: appearMs });
+      } catch {
+        // The prelude never showed. Fall through and paste the message anyway:
+        // losing the context is survivable, losing the message is not.
+      }
+    }
+    // The SCREEN, not `inputText`: the box's visible text is read off its `❯`
+    // line alone, so once a prelude has filled that line everything appended
+    // after it lands on continuation lines and `inputText` stops moving. Waiting
+    // on it then times out on a paste that arrived perfectly — which is exactly
+    // what the first version of this did, on every prelude long enough to wrap.
+    const afterPrelude = pilot.screen();
     pilot.paste(text);
     try {
       await pilot.waitFor((s) => {
         const now = inputText(s);
-        return now !== "" && now !== before;
+        if (now === "" || now === before) return false; // nothing in the box yet
+        // With no prelude this is the original condition, unchanged.
+        return !prelude || s !== afterPrelude;
       }, { timeoutMs: appearMs });
       return true;
     } catch {
@@ -343,6 +373,8 @@ export async function typeIntoBox(
         const now = inputText(s);
         return now === "" || now === before;
       };
+      // `before` (not `beforeText`) on purpose: a retry re-pastes the prelude,
+      // so the box has to come back to what it was before EITHER paste.
       // Ctrl-U clears ONE line, not the box (seen on 2.1.296): a two-line paste
       // takes three presses — the last line, the newline, the first line. Two
       // presses left the first line behind and the next attempt pasted after it,
