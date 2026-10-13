@@ -238,7 +238,13 @@ export function formatLedgerBlock(rows: LedgerRow[], total: number): string {
   return line.length > BLOCK_MAX * 2 ? line.slice(0, BLOCK_MAX * 2 - 1) + "…" : line;
 }
 
-/** Prepend the block as its own leading line. Idempotent. */
+/** Prepend the block as its own leading line. Idempotent.
+ *
+ *  NOT how the block reaches a live agent any more — it goes in as a separate
+ *  PASTE (`pilot.submit(text, prelude)`), which is what keeps the user's message
+ *  out of the `<pasted_content>` wrapper. Kept because it is the exact shape of
+ *  every transcript written before that change, which `stripLedgerBlock` must go
+ *  on understanding and which the tests build from. */
 export function markLedgerBlock(text: string, block: string): string {
   if (hasLedgerBlock(text)) return text;
   return `${block}\n${text}`;
@@ -271,7 +277,13 @@ export function stripLedgerBlock(text: string): string {
   const lines = text.split("\n");
   let i = 1; // drop the header line
   while (i < lines.length && (lines[i].startsWith("• ") || CONT_LINE.test(lines[i]))) i++;
-  return lines.slice(i).join("\n");
+  // …and the blank lines it leaves behind. The block now travels as its OWN
+  // paste, so the transcript holds `</pasted_content>` and a blank line between
+  // it and the ⟦platform⟧ header; `userPromptText` peels the tags but not the
+  // gap. A leading blank line is not cosmetic here — `parsePromptMeta` reads the
+  // FIRST line, so it would stop recognising the header, losing the sender and
+  // leaving `⟦web · … · admin⟧` visible in the chat.
+  return lines.slice(i).join("\n").replace(/^\n+/, "");
 }
 
 /* ------------------------------------------------------------------ *

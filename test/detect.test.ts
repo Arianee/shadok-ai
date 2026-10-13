@@ -291,3 +291,98 @@ test("typeIntoBox: a slow MULTI-LINE paste is cleared whole before the retry", a
   assert.equal(ok, true);
   assert.equal(p.st.box, text); // one copy, nothing left over from the first
 });
+
+/* ------------------------------------------------------------------ *
+ * The prelude: injected context goes in as its OWN paste, before the
+ * message. Claude Code keeps only the CURRENT paste inline and wraps every
+ * earlier one in `<pasted_content>` — material its own system prompt says to
+ * act on only where the user's message asks. Pasted as one blob, the HUMAN's
+ * words landed inside that wrapper and stopped being an instruction.
+ * Spec: docs/superpowers/specs/2026-10-13-ledger-prelude-paste.md
+ * ------------------------------------------------------------------ */
+
+/** A box that WRAPS, which the plain fake does not. `inputText` reads the `❯`
+ *  line alone, so once the first visual line is full everything after it is
+ *  invisible to it — the exact shape that broke the first version of this. */
+function wrappingBox(cols: number, landDelays: number[] = []) {
+  const st = { box: "", pastes: [] as string[], clears: 0 };
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const render = () => {
+    const head = st.box.slice(0, cols);
+    const tail = st.box.slice(cols);
+    const rest = tail.match(new RegExp(`.{1,${cols}}`, "g")) ?? [];
+    return ["⏺ Done.", "❯ " + head, ...rest].join("\n");
+  };
+  return {
+    st,
+    paste(text: string) {
+      const d = landDelays[st.pastes.length] ?? 0;
+      st.pastes.push(text);
+      if (d <= 0) st.box += text;
+      else setTimeout(() => (st.box += text), d);
+    },
+    clearInput() {
+      st.box = "";
+      st.clears++;
+    },
+    screen: render,
+    async waitFor(pred: (s: string) => boolean, opts?: { timeoutMs?: number }) {
+      const deadline = Date.now() + (opts?.timeoutMs ?? 1000);
+      while (Date.now() < deadline) {
+        const screen = render();
+        if (pred(screen)) return screen;
+        await sleep(2);
+      }
+      throw new Error("timeout");
+    },
+  };
+}
+
+test("typeIntoBox: a prelude is a SEPARATE paste, and the MESSAGE is the last one", async () => {
+  // The order is the whole mechanism: only the last paste stays inline, so the
+  // message has to be it. Reversed, the fix would do nothing at all.
+  const p = wrappingBox(200);
+  const ok = await typeIntoBox(p, "the user's words", { appearMs: 60, prelude: "⟦ledger · 1 update⟧ • [a1b2] x — resolved" });
+  assert.equal(ok, true);
+  assert.equal(p.st.pastes.length, 2);
+  assert.match(p.st.pastes[0], /^⟦ledger/);
+  assert.equal(p.st.pastes[1], "the user's words");
+  assert.equal(p.st.clears, 0); // no retry on the happy path
+});
+
+test("typeIntoBox: a prelude landing first must not be mistaken for the message", async () => {
+  // Two ways to get this wrong, and the fix has to miss both.
+  //
+  // Watch the `❯` line for a change AFTER the prelude and you wait forever: it
+  // reads that line alone, so once a prelude has saturated it the appended
+  // message moves nothing there. Six attempts, six Ctrl-U, "the text never
+  // appeared in the input box" — on a live agent, on a paste that had arrived.
+  //
+  // Watch it against the PRE-prelude baseline instead and the prelude alone
+  // satisfies it: `typeIntoBox` returns while the message is still in flight,
+  // the caller presses Enter, and the agent is sent the ledger block with no
+  // message under it. Silent, and the user's prompt is simply gone.
+  const prelude = "⟦ledger · 1 update⟧ • [a1b2] a long entity — resolved (PR#1)";
+  const p = wrappingBox(20, [0, 40]); // line full at once; message lands later
+  const ok = await typeIntoBox(p, "ALPHA", { appearMs: 300, settleMs: 5, clearMs: 10, prelude });
+  assert.equal(ok, true);
+  assert.equal(p.st.clears, 0); // recognised, not retried
+  // the message is REALLY there when the caller is told it is
+  assert.equal(p.st.box, prelude + "ALPHA");
+});
+
+test("typeIntoBox: with NO prelude the behaviour is byte-for-byte what it was", async () => {
+  const p = wrappingBox(20);
+  const ok = await typeIntoBox(p, "HELLO", { appearMs: 60 });
+  assert.equal(ok, true);
+  assert.deepEqual(p.st.pastes, ["HELLO"]);
+});
+
+test("typeIntoBox: a prelude that never lands must not take the message with it", async () => {
+  // Losing the injected context is survivable; losing the user's message is not.
+  const p = wrappingBox(200);
+  const dropped = { ...p, paste: (t: string) => { if (t.startsWith("⟦ledger")) { p.st.pastes.push(t); return; } p.paste(t); } };
+  const ok = await typeIntoBox(dropped as any, "ALPHA", { appearMs: 30, prelude: "⟦ledger · 1 update⟧ • [a1b2] x — resolved" });
+  assert.equal(ok, true);
+  assert.equal(p.st.box, "ALPHA"); // the message got through on its own
+});

@@ -220,3 +220,17 @@ test("the block is ONE LINE and within budget — a fourth line neutralises the 
   assert.ok(one.includes("[a1b2]"));
   assert.ok(one.length <= 640);
 });
+
+test("stripLedgerBlock eats the gap the paste wrapper leaves, or the ⟦platform⟧ header shows", () => {
+  // The block now travels as its OWN paste, so a transcript that collapsed it
+  // reads `</pasted_content>` and then a BLANK LINE before the ⟦platform⟧
+  // header. `userPromptText` peels the tags; it does not close the gap. And the
+  // gap is not cosmetic: `parsePromptMeta` reads the FIRST line, so a leading
+  // blank one loses the sender and leaves `⟦web · … · admin⟧` in the chat.
+  const block = formatLedgerBlock([{ id: "a1b2", entity: "x", status: "resolved", note: "Fixed it.", updatedAt: 1 }], 1);
+  const user = "please ship it";
+  const peeled = `${block}\n\n\n⟦web · 2026-10-13 13:14 · admin⟧\n${user}`;
+  const bare = stripLedgerBlock(peeled);
+  assert.ok(bare.startsWith("⟦web · "), `header must lead, got ${JSON.stringify(bare.slice(0, 20))}`);
+  assert.equal(stripPromptMeta(bare), user);
+});
