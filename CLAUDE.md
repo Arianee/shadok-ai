@@ -1190,3 +1190,16 @@ Auth section of `docs/architecture.md`).
 - After any change with runtime surface: `npm run build`, then verify in the
   browser (not just tsc) — side by side on a free port, never by taking over
   3789. See "Running YOUR build" above.
+- **A test that HANGS is worse than one that fails, so `npm test` carries
+  `--test-timeout`.** `node --test` has no default timeout, and a test that
+  throws *before* its teardown leaves whatever it opened open — a listening
+  socket is enough that node never exits. The runner then waits forever and the
+  suite reports **nothing at all**: no pass count, no failure, no clue which
+  file. `test/heartbeat.test.ts` did exactly that, from an assertion that was
+  ~5% flaky under load (measured: 3 hangs in 60 runs, the sweep timer racing the
+  pong's own round trip). One run sat wedged for eleven hours; ten orphan node
+  processes were still alive when it was found, the oldest from mid-August. Two
+  halves, and both are needed: teardown goes in a `finally` — the rule for any
+  test that opens a socket, a tmux pane or a child process — and the timeout is
+  the net for the next one that forgets. The whole suite runs in ~20s, so 120s
+  per test only ever catches a hang.
