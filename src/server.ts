@@ -106,6 +106,8 @@ import {
   ownedByPeer,
   peersOutFileFor,
   agentInvitePrompt,
+  peerScope,
+  type Peer,
 } from "./peers.js";
 import {
   loadCrons,
@@ -831,6 +833,13 @@ function currentAccount(req: { headers: Record<string, unknown> }): { name: stri
   const skey = req.headers["x-shadok-session-key"];
   if (typeof skey === "string" && skey && sessionForKey(skey))
     return { name: BOOTSTRAP_ADMIN, role: "admin" };
+  // A MEMBER-scope peer (an invited agent from another instance) authenticates
+  // as a web MEMBER: everything a person you invite can do — see/drive EVERY
+  // agent, read `/usage` and `/live`, spawn — but never admin (no account or
+  // peer management). A RESTRICTED peer is NOT a member: it stays the boxed
+  // principal that `peerName`/the `peer-scope` checks handle.
+  const prow = peerRow(req);
+  if (prow && peerScope(prow) === "member") return { name: prow.name, role: "member" };
   const tok = cookieToken(req.headers.cookie as string | undefined);
   if (!tok) return null;
   const user = readSession(tok, signingSecret(), Date.now(), SESSION_TTL_MS);
@@ -853,12 +862,24 @@ function requestAuthed(req: { headers: Record<string, unknown> }): boolean {
  * registry is re-read every call, so a `DELETE /peers` takes effect at once
  * (the invariant-33 pattern: no session store, revocation lives on disk).
  */
-function peerName(req: { headers: Record<string, unknown> }): string | null {
+function peerRow(req: { headers: Record<string, unknown> }): Peer | null {
   const tok = req.headers["x-shadok-peer"];
   if (typeof tok !== "string" || !tok) return null;
   // `withSalts` so a row written before salts existed is verified against a
   // backfilled one — i.e. its old deterministic token is refused, not honoured.
-  return peerFromToken(tok, signingSecret(), withSalts(loadPeers(peerFileFor())));
+  const peers = withSalts(loadPeers(peerFileFor()));
+  const name = peerFromToken(tok, signingSecret(), peers);
+  return name ? peers.find((p) => p.name === name) ?? null : null;
+}
+function peerName(req: { headers: Record<string, unknown> }): string | null {
+  return peerRow(req)?.name ?? null;
+}
+/** The scope of the peer a request authenticates as (`member`/`restricted`), or
+ *  null when it is not a peer. `member` peers act as web members; `restricted`
+ *  ones stay boxed to the agents they created. */
+function peerScopeFor(req: { headers: Record<string, unknown> }): "member" | "restricted" | null {
+  const row = peerRow(req);
+  return row ? peerScope(row) : null;
 }
 function passwordMatches(input: string): boolean {
   const a = Buffer.from(input);
@@ -1275,10 +1296,10 @@ app.get("/diff", (req, res) => {
   // exists for — has certainly been resumed by then, so fall back to the
   // channel's own `repo`, as endChannel already does.
   const ch = loadChannels().find((c) => c.sessionId === s.id);
-  // A peer sees the diff of ITS OWN agents only — never another peer's or a
-  // local one's. (Accounts, which passed the gate above, see any.)
-  const peer = peerName(req);
-  if (peer && !ownedByPeer(ch, peer)) return res.status(403).json({ error: "not your agent" });
+  // A RESTRICTED peer sees the diff of ITS OWN agents only. A member peer (and
+  // any account) passed the gate as a member and sees any.
+  if (peerScopeFor(req) === "restricted" && !ownedByPeer(ch, peerName(req)!))
+    return res.status(403).json({ error: "not your agent" });
   res.json(gitDiff(s.cwd, s.worktree?.repo ?? ch?.repo ?? null));
 });
 // Past worktree sessions of a repo (for reopening unfinished work).
@@ -1684,6 +1705,8 @@ app.get("/peers", (req, res) => {
       name: p.name,
       createdAt: p.createdAt,
       note: p.note ?? null,
+      scope: peerScope(p),
+      pending: !!p.invite,
     })),
   );
 });
@@ -1694,10 +1717,16 @@ app.post("/peers", (req, res) => {
   if (!name) return res.status(400).json({ error: "a peer name is required" });
   const note = typeof req.body?.note === "string" ? req.body.note.trim() || undefined : undefined;
   const brief = typeof req.body?.brief === "string" ? req.body.brief : "";
+  // Scope: `restricted` (default — only the agents it spawns) or `member` (acts
+  // like an invited user, sees and drives the whole cockpit). Anything but the
+  // exact string "member" is restricted, so a stray value, an old client or a
+  // body that forgot the key never hands out the whole cockpit by accident:
+  // widening is always something a caller spelled out.
+  const scope: "member" | "restricted" = req.body?.scope === "member" ? "member" : "restricted";
   const file = peerFileFor();
-  const { peers, ticket } = newPeer(loadPeers(file), name, Date.now(), note);
+  const { peers, ticket } = newPeer(loadPeers(file), name, Date.now(), note, scope);
   savePeers(file, peers);
-  console.log(`peers: ${me.name} invited peer ${name}`);
+  console.log(`peers: ${me.name} invited peer ${name} (${scope})`);
   // What is handed out is a SINGLE-USE TICKET, not the credential — the peer
   // exchanges it at `POST /peers/enrol` for a durable token it then keeps. So the
   // long-lived credential never travels through this response, the invite prompt,
@@ -1707,7 +1736,7 @@ app.post("/peers", (req, res) => {
   // The URL is the one the ADMIN is reaching us at (their browser origin), which
   // is the public URL an external agent would use too.
   const url = ((req.headers.origin as string | undefined)?.trim() || `http://${req.headers.host ?? "localhost"}`).replace(/\/+$/, "");
-  res.json({ ok: true, name, ticket, invitePrompt: agentInvitePrompt({ url, ticket, brief }) });
+  res.json({ ok: true, name, ticket, scope, invitePrompt: agentInvitePrompt({ url, ticket, brief, scope }) });
 });
 app.delete("/peers", (req, res) => {
   const me = accountAdmin(req, res);
@@ -3655,6 +3684,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   // it, and the `start` handler tags what it spawns so a peer only ever touches
   // its own agents.
   const callerPeer = peerName(req);
+  // A RESTRICTED peer is boxed to its own agents (the ownership checks below);
+  // a MEMBER peer acts as a web member (`currentAccount` above already returns
+  // it as one) and those checks are skipped. The tag is still written for BOTH,
+  // so the cockpit always shows which peer created what.
+  const callerPeerRestricted = peerScopeFor(req) === "restricted";
   (ws as WebSocket & { __peer?: string | null }).__peer = callerPeer;
   // A same-origin browser, decided ONCE at connect from the upgrade's headers —
   // not from anything a frame says. `run` is gated on it: shell mode bypasses a
@@ -3780,10 +3814,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           // onto a channel it does not own (a fresh spawn below becomes its own).
           // This is the ownership boundary — without it a peer could attach to any
           // of B's live agents by naming its id (which `/live` publishes).
-          if (callerPeer && resumed) {
+          if (callerPeer && callerPeerRestricted && resumed) {
             const ch = loadChannels().find((c) => c.sessionId === id);
             if (!ownedByPeer(ch, callerPeer))
-              return fail("a peer may only resume its own agents", "peer-scope");
+              return fail("a restricted peer may only resume its own agents", "peer-scope");
           }
 
           // Isolation: run a NEW session inside a fresh git worktree so the
@@ -4371,12 +4405,12 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           // web ✕. Falls back to this connection's attached session.
           const id = msg.sessionId ?? session?.id;
           if (!id) return;
-          // A peer may only stop ITS OWN agents — not another peer's or a local
-          // one's. Its bound `session` is already its own; the guard is for an
-          // explicit `sessionId` naming someone else's.
-          if (callerPeer) {
+          // A RESTRICTED peer may only stop ITS OWN agents; a member peer stops
+          // any (like a member). The guard is for an explicit `sessionId` naming
+          // someone else's — the bound `session` is already its own.
+          if (callerPeer && callerPeerRestricted) {
             const ch = loadChannels().find((c) => c.sessionId === id);
-            if (!ownedByPeer(ch, callerPeer)) return fail("a peer may only stop its own agents", "peer-scope");
+            if (!ownedByPeer(ch, callerPeer)) return fail("a restricted peer may only stop its own agents", "peer-scope");
           }
           await endChannel(id);
           if (session?.id === id) session = null;

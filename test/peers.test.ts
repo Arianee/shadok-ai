@@ -16,6 +16,7 @@ import {
   peerFileFor,
   peersOutFileFor,
   agentInvitePrompt,
+  peerScope,
 } from "../src/peers.js";
 
 const secret = randomBytes(32);
@@ -175,4 +176,44 @@ test("agentInvitePrompt never carries a durable token", () => {
   const p = agentInvitePrompt({ url: "http://h", ticket: "tkt" });
   assert.ok(!/peer key:/i.test(p), "no durable key in an invitation");
   assert.match(p, /exchanges it for your own durable key/);
+});
+
+test("peerScope: defaults to restricted; member only when spelled out", () => {
+  // The default is the NARROW one, and it is load-bearing in two directions: a
+  // row written before scopes existed must not start driving the whole cockpit
+  // on an upgrade (an already-issued credential never widens on its own), and a
+  // caller that forgets the key must not hand one out by accident.
+  assert.equal(peerScope(undefined), "restricted");
+  assert.equal(peerScope({}), "restricted", "a row with no scope is a legacy row: box it");
+  assert.equal(peerScope({ scope: "member" }), "member");
+  assert.equal(peerScope({ scope: "restricted" }), "restricted");
+  // A stray value is not a member either — only the exact string widens.
+  assert.equal(peerScope({ scope: "Member" as "member" }), "restricted");
+  assert.equal(peerScope({ scope: "admin" as unknown as "member" }), "restricted");
+});
+
+test("newPeer / addPeer store the scope; default restricted", () => {
+  const a = newPeer([], "brasdroit1", 1000).peers[0];
+  assert.equal(a.scope, "restricted"); // default
+  const b = newPeer([], "brasdroit2", 1000, undefined, "member").peers[0];
+  assert.equal(b.scope, "member");
+  // Written down, not left absent: a stored row says what it is, so reading it
+  // back never depends on the default staying what it is today.
+  assert.equal(addPeer([], "c", 1000, undefined, "salt", "tkt").at(-1)!.scope, "restricted");
+});
+
+test("agentInvitePrompt: member says full member, restricted says own-agents-only", () => {
+  const m = agentInvitePrompt({ url: "http://h", ticket: "t", scope: "member" });
+  assert.match(m, /full member of that cockpit/);
+  assert.match(m, /EVERY agent/);
+  assert.match(m, /cannot manage its accounts or its peers/);
+  const r = agentInvitePrompt({ url: "http://h", ticket: "t", scope: "restricted" });
+  assert.match(r, /only see and drive the agents you spawn/);
+  assert.ok(!/full member/.test(r));
+  // No scope in the call → the invitation describes the RESTRICTED reach, the
+  // same default `peerScope` applies to the stored row. The prompt an invitee
+  // reads and the authority it actually gets must never disagree.
+  const d = agentInvitePrompt({ url: "http://h", ticket: "t" });
+  assert.match(d, /only see and drive the agents you spawn/);
+  assert.ok(!/full member/.test(d));
 });
