@@ -1693,7 +1693,37 @@
   #ledgerList .ldg-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; opacity: .55;
     border: 1px solid currentColor; border-radius: 3px; padding: 0 4px; }
   #ledgerList .ldg-meta { color: var(--text-dim); font-size: 10px; margin-top: 2px; }
-  #ledgerList .ldg-note { font-size: 12px; opacity: .85; margin-top: 3px; }
+  #ledgerList .ldg-note { font-size: 12px; opacity: .85; margin-top: 3px; cursor: pointer;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  #ledgerList .ldg-note.open { -webkit-line-clamp: unset; overflow: visible; }
+  #ledgerList .ldg-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; opacity: .55;
+    border: 1px solid var(--line, #3a3d42); border-radius: 3px; padding: 0 4px; cursor: pointer; }
+  #ledgerList .ldg-id:hover { opacity: .95; }
+  #ledgerList .ldg-stale { color: #e9a23b; }
+  #ledgerTools { margin-bottom: 10px; }
+  #ledgerTools .ldg-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  #ledgerTools input, #ledgerTools select { background: rgba(255,255,255,.04); border: 1px solid var(--line, #3a3d42);
+    border-radius: 6px; color: inherit; font-family: inherit; padding: 5px 8px; }
+  /* The compact size is gated on a FINE pointer, and that is the whole of why.
+     `#ledgerTools input` (0,1,0,1) ties with the same selector in the
+     (pointer: coarse) block and comes LATER, so naming it there does nothing —
+     measured in a real phone viewport, the field stayed 13px. Under 16px Safari
+     zooms on focus, which widens the layout viewport and sets the entire
+     cockpit sliding sideways (invariant 28). So the small size never exists on
+     touch rather than being overridden on it — and the shorthand is
+     `font-family`, not `font`, because `font: inherit` sets the SIZE too (to
+     the body's 15px) and would lose the same tie in the same silent way. */
+  @media (pointer: fine) {
+    #ledgerTools input, #ledgerTools select { font-size: 13px; }
+  }
+  #ledgerTools #ledgerSearch { flex: 1 1 150px; min-width: 120px; }
+  #ledgerTools select { flex: 0 1 auto; max-width: 46%; }
+  #ledgerTools .ldg-chips { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 7px; }
+  #ledgerTools .ldg-chip { background: none; border: 1px solid var(--line, #3a3d42); border-radius: 999px;
+    color: inherit; cursor: pointer; font-size: 11px; opacity: .65; padding: 2px 9px; }
+  #ledgerTools .ldg-chip[aria-pressed="true"] { opacity: 1; border-color: currentColor; background: rgba(255,255,255,.08); }
+  #ledgerTools .ldg-chip .n { opacity: .55; margin-left: 4px; }
+  #ledgerTools .ldg-count { color: var(--text-dim); font-size: 11px; margin-top: 7px; }
   #secretsPanel .sec-repo { font-size: 12px; opacity: .8; margin-bottom: 4px; word-break: break-all; }
   #secretsPanel .sec-note { font-size: 12px; opacity: .65; margin: 6px 0 12px; }
   #secretsList { list-style: none; padding: 0; margin: 0 0 12px; }
@@ -1909,6 +1939,15 @@
         <button id="ledgerClose" title="Close">✕</button>
       </div>
       <p class="sec-note">What sibling agents have resolved or decided, so no one re-raises it. One row per entity; a new record supersedes it. Read-only here — agents write it via the <code>shadok-ledger</code> skill.</p>
+      <div id="ledgerTools">
+        <div class="ldg-row">
+          <input id="ledgerSearch" type="search" placeholder="search label, note, source, id…" autocomplete="off" />
+          <select id="ledgerAge" title="How long since the row's claim was last confirmed"></select>
+          <select id="ledgerSort" title="Order"></select>
+        </div>
+        <div id="ledgerChips" class="ldg-chips"></div>
+        <div id="ledgerCount" class="ldg-count"></div>
+      </div>
     </div>
     <div class="pin-body">
       <ul id="ledgerList"></ul>
@@ -2387,6 +2426,12 @@
   window.claudeUpdateState = claudeUpdateState;
   import { uploadFailure } from "/upload.js?v=__ASSET_V__";
   window.uploadFailure = uploadFailure;
+  import { filterLedger, ledgerFacets, ledgerAge, LEDGER_AGES, LEDGER_SORTS } from "/ledger-view.js?v=__ASSET_V__";
+  window.filterLedger = filterLedger;
+  window.ledgerFacets = ledgerFacets;
+  window.ledgerAge = ledgerAge;
+  window.LEDGER_AGES = LEDGER_AGES;
+  window.LEDGER_SORTS = LEDGER_SORTS;
   window.MODEL_CHOICES = MODEL_CHOICES;
   window.composeModel = composeModel;
   window.pickChannelSource = pickChannelSource;
@@ -2464,6 +2509,13 @@
     bubblePlacement: () => null,
     unionRect: () => null,
     visibleSteps: (steps) => steps ?? [],
+    // The viewer is opened by a click, so the module is long since loaded —
+    // but a stub is still the rule (invariant 10), and the honest one here
+    // shows the table UNFILTERED rather than an empty panel that reads as
+    // "the ledger is empty".
+    filterLedger: (entries) => entries ?? [],
+    ledgerFacets: () => ({ status: [], kind: [] }),
+    ledgerAge: () => null,
     // A missing module must leave the picker EMPTY and silent rather than
     // half-built: an empty list renders no chips, so the form still starts an
     // agent on its profile's model, which is what it did before this existed.
@@ -7181,11 +7233,18 @@
     const age = days <= 0 ? "today" : days === 1 ? "yesterday" : days + "d ago";
     return abs + " · " + age;
   }
+  // Everything `GET /ledger` returned, narrowed client-side: the table is small
+  // enough to send whole and large enough (144 rows here, 498 on a sibling one
+  // day later) that a flat list stops being readable.
+  let ledgerAll = [];
+  const ledgerQuery = { text: "", status: [], kind: [], age: "any", sort: "recent" };
   function renderLedger(entries) {
     const ul = $("ledgerList");
     ul.innerHTML = "";
     if (!entries || !entries.length) {
-      ul.innerHTML = '<li><span style="opacity:.6">the ledger is empty</span></li>';
+      ul.innerHTML = '<li><span style="opacity:.6">'
+        + (ledgerAll.length ? "no row matches these filters" : "the ledger is empty")
+        + "</span></li>";
       return;
     }
     for (const e of entries) {
@@ -7207,16 +7266,96 @@
       const verified = e.verifiedAt && e.verifiedAt !== e.updatedAt ? " · verified " + ldgWhen(e.verifiedAt) : "";
       meta.textContent = ldgWhen(e.updatedAt) + verified + (e.source ? " · " + e.source : "");
       if (e.updatedAt) meta.title = new Date(e.updatedAt).toLocaleString();
+      // A month without a confirmation is the state the skill's hedge is about,
+      // so it is marked rather than left to be computed off a date.
+      const age = window.ledgerAge(e);
+      if (age != null && age > 30) meta.classList.add("ldg-stale");
+      // The id is the durable handle: `record --id a1b2` is what you tell an
+      // agent, and until now the viewer was the one place that did not show it.
+      if (e.id) {
+        const idb = document.createElement("button");
+        idb.className = "ldg-id"; idb.type = "button"; idb.textContent = e.id;
+        idb.title = "copy this id — agents update a row with `record --id " + e.id + "`";
+        idb.addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(e.id); idb.textContent = "copied"; }
+          catch { idb.textContent = e.id; }
+          setTimeout(() => { idb.textContent = e.id; }, 900);
+        });
+        head.appendChild(idb);
+      }
       li.append(head, meta);
-      if (e.note) { const n = document.createElement("div"); n.className = "ldg-note"; n.textContent = e.note; li.appendChild(n); }
+      if (e.note) {
+        // Notes run to a couple of thousand characters on a busy table, so a
+        // filtered list of them is a wall. Three lines, and a click opens the
+        // one you came for — the first sentence is the headline anyway, which
+        // is exactly what the pushed block carries.
+        const n = document.createElement("div");
+        n.className = "ldg-note"; n.textContent = e.note; n.title = "click to expand";
+        n.addEventListener("click", () => n.classList.toggle("open"));
+        li.appendChild(n);
+      }
       ul.appendChild(li);
     }
   }
+  /** Re-narrow and repaint from the rows already in hand — no round trip. */
+  function applyLedgerFilters() {
+    const shown = window.filterLedger(ledgerAll, ledgerQuery);
+    renderLedger(shown);
+    const n = ledgerAll.length;
+    $("ledgerCount").textContent = shown.length === n
+      ? n + (n === 1 ? " row" : " rows")
+      : shown.length + " of " + n + " rows";
+  }
+  /** The chips are built from the data, never from a fixed list: `status` is
+   *  free text, so a hardcoded set would hide whatever word nobody predicted. */
+  function paintLedgerChips() {
+    const box = $("ledgerChips");
+    box.innerHTML = "";
+    const facets = window.ledgerFacets(ledgerAll);
+    for (const [dim, items] of [["status", facets.status], ["kind", facets.kind]]) {
+      for (const it of items) {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "ldg-chip";
+        b.setAttribute("aria-pressed", String(ledgerQuery[dim].includes(it.value)));
+        b.innerHTML = "";
+        b.appendChild(document.createTextNode(it.value));
+        const n = document.createElement("span"); n.className = "n"; n.textContent = it.count;
+        b.appendChild(n);
+        b.addEventListener("click", () => {
+          const sel = ledgerQuery[dim];
+          const i = sel.indexOf(it.value);
+          if (i < 0) sel.push(it.value); else sel.splice(i, 1);
+          b.setAttribute("aria-pressed", String(i < 0));
+          applyLedgerFilters();
+        });
+        box.appendChild(b);
+      }
+    }
+  }
+  for (const [id, key] of [["ledgerAge", "age"], ["ledgerSort", "sort"]]) {
+    const sel = $(id);
+    sel.addEventListener("change", () => { ledgerQuery[key] = sel.value; applyLedgerFilters(); });
+  }
+  $("ledgerSearch").addEventListener("input", () => {
+    ledgerQuery.text = $("ledgerSearch").value;
+    applyLedgerFilters();
+  });
   $("ledgerBtn").addEventListener("click", async () => {
-    let entries = [];
-    try { entries = (await (await fetch("/ledger")).json()).entries || []; } catch { entries = []; }
-    renderLedger(entries);
+    try { ledgerAll = (await (await fetch("/ledger")).json()).entries || []; } catch { ledgerAll = []; }
+    // The option lists come from the module, so the control and the filter it
+    // drives cannot drift apart.
+    for (const [id, list] of [["ledgerAge", window.LEDGER_AGES], ["ledgerSort", window.LEDGER_SORTS]]) {
+      const sel = $(id);
+      if (!sel.options.length) {
+        for (const o of list ?? []) sel.add(new Option(o.label, o.value));
+      }
+    }
+    $("ledgerAge").value = ledgerQuery.age;
+    $("ledgerSort").value = ledgerQuery.sort;
+    paintLedgerChips();
+    applyLedgerFilters();
     $("ledgerOverlay").hidden = false;
+    $("ledgerSearch").focus();
   });
   $("ledgerClose").addEventListener("click", () => { $("ledgerOverlay").hidden = true; });
   $("ledgerOverlay").addEventListener("click", (e) => { if (e.target === $("ledgerOverlay")) $("ledgerOverlay").hidden = true; });
