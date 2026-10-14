@@ -59,22 +59,25 @@ export interface Peer {
   enrolledAt?: number;
   /**
    * How much of this cockpit the peer may touch:
-   *  - `member` (default) — everything a web MEMBER can: see and drive EVERY
-   *    agent, read `/usage` / `/live`, spawn, the lot. Not admin (no account or
-   *    peer management). "Invite an agent like a user."
-   *  - `restricted` — only the agents IT created (`ownedByPeer`), and only
-   *    `GET /diff` over HTTP. For a collaborator you want cloistered.
-   * Absent on a row from before scopes existed → treated as `member` by
-   * `peerScope` (the behaviour the owner asked for; a saltless legacy row is
-   * re-invited anyway).
+   *  - `restricted` (default) — only the agents IT created (`ownedByPeer`), and
+   *    only `GET /diff` over HTTP. The scope a peer gets when nobody says
+   *    otherwise.
+   *  - `member` — everything a web MEMBER can: see and drive EVERY agent, read
+   *    `/usage` / `/live`, spawn, the lot. Not admin (no account or peer
+   *    management). "Invite an agent like a user."
+   * Absent on a row from before scopes existed → `restricted`, so an upgrade
+   * can never widen a credential that is already out there: a peer that was
+   * boxed to its own agents stays boxed until someone RE-INVITES it as a
+   * member. Widening is a decision, and a decision is written down.
    */
   scope?: "member" | "restricted";
 }
 
-/** The scope of a peer row, defaulting to `member`. The one place the default
- *  lives, so a stored row and a bare token agree. */
+/** The scope of a peer row, defaulting to `restricted`. The one place the
+ *  default lives, so a stored row and a bare token agree — and it is the SAFE
+ *  one: `member` only ever comes from something that spelled it out. */
 export function peerScope(peer: { scope?: "member" | "restricted" } | undefined): "member" | "restricted" {
-  return peer?.scope === "restricted" ? "restricted" : "member";
+  return peer?.scope === "member" ? "member" : "restricted";
 }
 
 /** How long a ticket stays redeemable. Long enough to reach an agent that is
@@ -138,7 +141,7 @@ export function addPeer(
   salt: string,
   ticket: string,
   ttlMs: number = PEER_INVITE_TTL_MS,
-  scope: "member" | "restricted" = "member",
+  scope: "member" | "restricted" = "restricted",
 ): Peer[] {
   const row: Peer = {
     name,
@@ -157,7 +160,7 @@ export function newPeer(
   name: string,
   now: number,
   note?: string,
-  scope: "member" | "restricted" = "member",
+  scope: "member" | "restricted" = "restricted",
 ): { peers: Peer[]; ticket: string } {
   const ticket = randomBytes(32).toString("base64url");
   return {

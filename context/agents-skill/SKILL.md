@@ -134,11 +134,12 @@ pilotctl stop <id> --peer brasdroit1
   point: the other instance decides who may reach it.
 - What you may touch on X depends on the **scope** its admin gave you when they
   invited you:
-  - **member** (the default) — you act like an invited user: `list`, `diff`,
-    resume/drive/stop **any** agent on X, spawn more, read its usage. You are not
-    an admin (no account or peer management).
-  - **restricted** — only the agents YOU spawned on X; `--peer X list` and a diff
-    of someone else's agent come back refused (`peer-scope` / `403`).
+  - **restricted** (the default) — only the agents YOU spawned on X; `--peer X
+    list` and a diff of someone else's agent come back refused (`peer-scope` /
+    `403`). Assume this one unless you were told otherwise.
+  - **member** — you act like an invited user: `list`, `diff`, resume/drive/stop
+    **any** agent on X, spawn more, read its usage. You are not an admin (no
+    account or peer management).
   Track the ids you `spawn` either way and drive them by id.
 
 ## Guardrails

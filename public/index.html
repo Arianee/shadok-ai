@@ -2166,14 +2166,17 @@
       <div class="ib-url" id="inviteUrl"></div>
     </div>
     <hr class="peers-sep">
-    <p class="sec-note"><b>Invite an agent</b> — of yours, or a teammate's — to collaborate here. Like a user, but instead of a login it gets a <b>prompt to paste</b> into its own session. <b>member</b> acts like a user (sees and drives the whole cockpit, never admin); <b>restricted</b> only touches the agents it spawns.</p>
+    <p class="sec-note"><b>Invite an agent</b> — of yours, or a teammate's — to collaborate here. Like a user, but instead of a login it gets a <b>prompt to paste</b> into its own session. <b>restricted</b> (the default) only touches the agents it spawns; <b>member</b> acts like a user — it sees and drives the whole cockpit, never admin.</p>
     <ul id="peersList"></ul>
     <form id="peersAdd">
       <input id="peerName" placeholder="peer name (e.g. brasdroit1)" autocomplete="off" spellcheck="false">
       <input id="peerBrief" placeholder="brief — what should it do? (optional)" autocomplete="off">
-      <select id="peerScope" title="member: acts like a user (whole cockpit). restricted: only the agents it spawns.">
-        <option value="member">member (whole cockpit)</option>
+      <!-- restricted FIRST, so the selected-by-default option is the narrow one:
+           handing over the whole cockpit is a choice you make, never one you
+           forget to unmake. -->
+      <select id="peerScope" title="restricted: only the agents it spawns. member: acts like a user (whole cockpit).">
         <option value="restricted">restricted (own agents)</option>
+        <option value="member">member (whole cockpit)</option>
       </select>
       <button type="submit">Invite agent</button>
     </form>
@@ -8170,7 +8173,10 @@
       const meta = document.createElement("div");
       const who = document.createElement("b"); who.textContent = p.name;
       const sub = document.createElement("div"); sub.className = "pmeta";
-      sub.textContent = (p.scope === "restricted" ? "restricted" : "member")
+      // Mirrors `peerScope` on the server: anything that is not an explicit
+      // `member` reads as restricted, so a row from before scopes is not
+      // labelled wider than it is.
+      sub.textContent = (p.scope === "member" ? "member" : "restricted")
         + (p.note ? " · " + p.note : "")
         + (p.pending ? " · not enrolled yet" : "");
       meta.append(who, sub);

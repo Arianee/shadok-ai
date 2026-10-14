@@ -1717,10 +1717,12 @@ app.post("/peers", (req, res) => {
   if (!name) return res.status(400).json({ error: "a peer name is required" });
   const note = typeof req.body?.note === "string" ? req.body.note.trim() || undefined : undefined;
   const brief = typeof req.body?.brief === "string" ? req.body.brief : "";
-  // Scope: `member` (default — acts like an invited user, sees/drives the whole
-  // cockpit) or `restricted` (only the agents it spawns). Anything but the exact
-  // string "restricted" is member, so a stray value never silently boxes a peer.
-  const scope: "member" | "restricted" = req.body?.scope === "restricted" ? "restricted" : "member";
+  // Scope: `restricted` (default — only the agents it spawns) or `member` (acts
+  // like an invited user, sees and drives the whole cockpit). Anything but the
+  // exact string "member" is restricted, so a stray value, an old client or a
+  // body that forgot the key never hands out the whole cockpit by accident:
+  // widening is always something a caller spelled out.
+  const scope: "member" | "restricted" = req.body?.scope === "member" ? "member" : "restricted";
   const file = peerFileFor();
   const { peers, ticket } = newPeer(loadPeers(file), name, Date.now(), note, scope);
   savePeers(file, peers);

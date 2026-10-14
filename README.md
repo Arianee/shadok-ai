@@ -412,11 +412,15 @@ The credential is **non-expiring and revocable** (`DELETE /peers?name=instance-a
 on B kills it immediately — future calls **and** the live link). Each invitation
 carries a **scope**, chosen when you invite:
 
-- **member** (the default) — the invited agent acts **like a person you invite**:
-  it sees, drives and measures **every** agent on B, spawns more, reads its usage.
-  It is not an admin (no account or peer management).
-- **restricted** — only the agents it creates on B; it can never see, resume,
-  drive or diff B's other agents.
+- **restricted** (the default) — only the agents it creates on B; it can never
+  see, resume, drive or diff B's other agents.
+- **member** — the invited agent acts **like a person you invite**: it sees,
+  drives and measures **every** agent on B, spawns more, reads its usage. It is
+  not an admin (no account or peer management).
+
+The narrow scope is what you get when you say nothing — including for a peer
+invited before scopes existed, which stays restricted until you re-invite it as a
+member. A credential already in someone else's hands never widens on its own.
 
 **This is remote code execution by a third party** — a peer that can `spawn` runs
 commands on B's machine, and a **member**-scope peer has a member's full reach. It
