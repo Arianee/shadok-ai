@@ -402,6 +402,40 @@ test("loadHistory on a missing transcript is empty, never throws", () => {
   assert.deepEqual(loadHistory("/nope/nowhere", "missing"), []);
 });
 
+test("loadHistory: a compaction summary is kept as a flagged user turn, not dropped or shown plain", () => {
+  const prevHome = process.env.HOME;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cp-compact-"));
+  process.env.HOME = tmp;
+  try {
+    const cwd = "/tmp/compact/project";
+    const sid = "compact-session";
+    const dir = path.join(tmp, ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+    fs.mkdirSync(dir, { recursive: true });
+    const summary =
+      "This session is being continued from a previous conversation that ran out of context. " +
+      "The summary below covers the earlier portion of the conversation.\n\nSummary:\n# lots of detail";
+    fs.writeFileSync(
+      path.join(dir, sid + ".jsonl"),
+      [
+        JSON.stringify({ type: "user", isCompactSummary: true, timestamp: "2026-10-14T20:00:00.000Z", message: { content: summary } }),
+        JSON.stringify({ type: "assistant", timestamp: "2026-10-14T20:00:10.000Z", message: { content: [{ type: "text", text: "Resuming." }] } }),
+        JSON.stringify({ type: "user", timestamp: "2026-10-14T20:01:00.000Z", message: { content: "carry on" } }),
+      ].join("\n"),
+    );
+    const turns = loadHistory(cwd, sid);
+    assert.deepEqual(turns.map((t) => t.role), ["user", "assistant", "user"]);
+    // The summary turn is flagged so the client can fold it — and its full text
+    // is preserved (collapsed, not truncated), while an ORDINARY user turn is not.
+    assert.equal(turns[0].compaction, true);
+    assert.equal(turns[0].text, summary);
+    assert.equal(turns[2].compaction, undefined);
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("loadHistory: a human prompt's ⟦context⟧ header is stripped, the message kept", () => {
   const prevHome = process.env.HOME;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cp-meta-"));

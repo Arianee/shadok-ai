@@ -267,6 +267,14 @@ export interface HistoryTurn {
    */
   from?: string;
   origin?: string;
+  /**
+   * A compaction summary: the long "This session is being continued…" block
+   * Claude Code writes as a USER message when it compacts the conversation
+   * (`isCompactSummary` on the .jsonl line). It is real transcript content, so
+   * it must survive a reload — but it is huge and drowns the chat, so the client
+   * folds it into a collapsible box instead of a full-width bubble.
+   */
+  compaction?: true;
 }
 
 /**
@@ -328,6 +336,14 @@ export function loadHistory(cwd: string, sessionId: string): HistoryTurn[] {
       }
       const text = userPromptText(e);
       if (text === null) continue; // tool result, system reminder, interruption
+      // A compaction summary is a (large) USER message Claude Code writes itself
+      // on /compact or an auto-compaction. Keep it — it is real history — but
+      // flag it so the client can fold it away instead of flooding the chat.
+      if (e.isCompactSummary) {
+        turns.push({ role: "user", text, compaction: true, ...when });
+        pendingHiddenPrompt = false;
+        continue;
+      }
       // A pushed ledger delta may ride ahead of ANY prompt — human, cron, or an
       // agent notification — so strip it BEFORE classifying: otherwise a cron /
       // agent prompt no longer starts with its hiding mark and would leak into
