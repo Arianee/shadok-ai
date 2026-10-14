@@ -2207,6 +2207,7 @@
     <label class="check"><input type="checkbox" id="profReadonly"><span>Read-only preset <span class="check-hint">— deny git commit/push/add/reset/rebase/merge/checkout</span></span></label>
     <div class="field"><span class="label">Deny (one per line)</span><textarea id="profDeny" rows="2" placeholder="Bash(git commit:*)"></textarea></div>
     <div class="field"><span class="label">Model (optional)</span><input id="profModel" placeholder="claude-opus-4-8" autocomplete="off" spellcheck="false"></div>
+    <div class="field"><span class="label">Thinking effort <span class="check-hint">— how hard agents of this role think before answering; higher costs more tokens</span></span><select id="profEffort"></select></div>
     <div class="field"><span class="label">Secrets to inject <span class="check-hint">— tick which vault secrets this profile passes to its agents</span></span><ul id="profSecretsList"></ul></div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button id="profSave" class="primary">Save profile</button>
@@ -2455,6 +2456,7 @@
   import { TOUR_STEPS, bubblePlacement, unionRect, visibleSteps } from "/tour-steps.js?v=__ASSET_V__";
   import { pickChannelSource, dirKey, serverSwapped } from "/channel-store.js?v=__ASSET_V__";
   import { MODEL_CHOICES, composeModel } from "/model-choice.js?v=__ASSET_V__";
+  import { EFFORT_CHOICES, effortLabel } from "/effort-choice.js?v=__ASSET_V__";
   import { bangCommands } from "/bang.js?v=__ASSET_V__";
   window.bangCommands = bangCommands;
   import { claudeUpdateState } from "/update-ready.js?v=__ASSET_V__";
@@ -2469,6 +2471,8 @@
   window.LEDGER_SORTS = LEDGER_SORTS;
   window.MODEL_CHOICES = MODEL_CHOICES;
   window.composeModel = composeModel;
+  window.EFFORT_CHOICES = EFFORT_CHOICES;
+  window.effortLabel = effortLabel;
   window.pickChannelSource = pickChannelSource;
   window.dirKey = dirKey;
   window.serverSwapped = serverSwapped;
@@ -2555,7 +2559,11 @@
     // half-built: an empty list renders no chips, so the form still starts an
     // agent on its profile's model, which is what it did before this existed.
     MODEL_CHOICES: [],
+    EFFORT_CHOICES: [],
     composeModel: () => null,
+    // Degrades to the sentinel's own wording, which is what an agent with no
+    // effort set actually runs at.
+    effortLabel: () => "profile default",
     // No module, no buttons: an agent's message renders exactly as before.
     bangCommands: () => [],
     // Boot-critical (runs in restore before the module might land): a fulfilled
@@ -3342,6 +3350,7 @@
     // box carries it, and there is no session to restart.
     if (tab.sessionId) items.push(["👤 Change profile…", () => openProfileSwitcher(tab)]);
     if (tab.sessionId) items.push(["🧠 Change model…", () => openModelSubmenu(tab)]);
+    if (tab.sessionId) items.push(["🤔 Thinking effort…", () => openEffortSubmenu(tab)]);
     // Scheduled prompts (crons) for this agent — the panel targets the active
     // channel, so switch to it first (this menu can be opened on any tab).
     if (tab.sessionId) items.push(["⏰ Schedule…", () => { activate(tab); $("cronOverlay").hidden = false; renderCrons(); }]);
@@ -3400,6 +3409,47 @@
     const choice = (window.MODEL_CHOICES || []).find((c) => c.id && c.id.toLowerCase() === alias.toLowerCase());
     const base = choice ? choice.label : alias;
     return long ? base + " · 1M" : base;
+  }
+  /** The per-agent thinking-effort picker, twin of the model one: `--effort` is
+   *  also a spawn arg, so picking a level always restarts the agent (history
+   *  kept) rather than recording a wish the running process does not carry. */
+  function openEffortSubmenu(tab) {
+    tabMenu.replaceChildren();
+    const head = document.createElement("div");
+    head.className = "tm-head";
+    const who = document.createElement("b");
+    who.textContent = "🤔 Thinking effort";
+    head.appendChild(who);
+    const sub = document.createElement("span");
+    sub.className = "tm-sub";
+    // Say the cost out loud: thinking tokens are billed even when collapsed.
+    sub.textContent = "Higher = more thinking, more tokens. Restarts the agent — history is kept.";
+    head.appendChild(sub);
+    tabMenu.appendChild(head);
+    const current = String(tab.effort ?? "").trim().toLowerCase();
+    for (const c of (window.EFFORT_CHOICES || [])) {
+      const b = document.createElement("button");
+      b.className = "tm-item";
+      b.textContent = ((c.id || "").toLowerCase() === current ? "● " : "○ ") + c.label;
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeTabMenu();
+        if (!tab.ws || tab.ws.readyState !== WebSocket.OPEN) {
+          addTurn(tab, "system", "", "Agent isn't connected — effort unchanged.", null, Date.now());
+          return;
+        }
+        sendTo(tab, { type: "set-effort", effort: c.id || null });
+        const label = window.effortLabel ? window.effortLabel(c.id) : (c.label || "default");
+        addTurn(tab, "system", "", "Thinking effort → " + label + ". Restarting the agent; history is kept.", null, Date.now());
+      });
+      tabMenu.appendChild(b);
+    }
+    const back = document.createElement("button");
+    back.className = "tm-item";
+    back.textContent = "‹ Back";
+    back.addEventListener("click", (e) => { e.stopPropagation(); openTabMenu(tab, lastMenuX, lastMenuY); });
+    tabMenu.appendChild(back);
+    placeTabMenu(lastMenuX, lastMenuY);
   }
   /** The per-agent model picker, shown as a SUBMENU of the agent menu (the list
    *  is short). Picking one changes the model, which — being a spawn arg — always
@@ -6171,6 +6221,8 @@
         t.appliedProfile = msg.applied;
         // The model this agent runs on (shown / changed in the agent menu).
         t.model = msg.model ?? null;
+        // Same for the thinking effort, picked in the same menu.
+        t.effort = msg.effort ?? null;
         break;
       case "parent":
         // Broadcast to every client, like `profile`: attaching from one tab
@@ -7238,7 +7290,7 @@
       const secrets = want.has(p.name)
         ? [...(p.secrets || []), name]
         : (p.secrets || []).filter((s) => s !== name);
-      const body = { name: p.name, deny: p.deny, allow: p.allow, model: p.model, secrets };
+      const body = { name: p.name, deny: p.deny, allow: p.allow, model: p.model, effort: p.effort, secrets };
       if (typeof p.systemPrompt === "string") body.systemPrompt = p.systemPrompt; // keep an edited prompt
       await fetch("/profiles", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       changed.push(p.name);
@@ -7945,14 +7997,30 @@
     syncTrackedPrompt();
     $("profDeny").value = (p.deny || []).join("\n");
     $("profModel").value = p.model || "";
+    fillEffortSelect($("profEffort"), p.effort || "");
     syncReadonlyBox();   // the box follows the real deny, no longer stuck at false
     editSecretRefs = [...(p.secrets || [])];
     renderProfSecrets();
+  }
+  /** Fills an effort <select> from the shared choices and selects `current`.
+   *  Built from EFFORT_CHOICES rather than hardcoded <option>s so the picker and
+   *  the server's whitelist cannot drift (test/effort.test.ts holds them equal). */
+  function fillEffortSelect(sel, current) {
+    if (!sel) return;
+    sel.replaceChildren();
+    for (const c of (window.EFFORT_CHOICES || [])) {
+      const o = document.createElement("option");
+      o.value = c.id;
+      o.textContent = c.label;
+      sel.appendChild(o);
+    }
+    sel.value = String(current ?? "");
   }
   function clearProfileForm() {
     editTracked = false; editForked = false;
     $("profEditTitle").textContent = "New profile";
     $("profName").value = ""; $("profRole").value = ""; $("profDeny").value = ""; $("profModel").value = "";
+    fillEffortSelect($("profEffort"), "");
     $("profReadonly").checked = false; editSecretRefs = [];   // deny area cleared just above
     renderProfSecrets();
   }
@@ -8004,6 +8072,7 @@
         prompt: $("profRole").value,
         deny: $("profDeny").value.split("\n").map((s) => s.trim()).filter(Boolean),
         model: $("profModel").value.trim(),
+        effort: $("profEffort").value,
         secrets: editSecretRefs,   // referenced vault NAMES
       },
       { tracked: editTracked, forked: editForked },

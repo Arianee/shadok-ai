@@ -145,6 +145,7 @@ both are silent in the DOM.
 | `public/profile-card.js` | Pure `profileBlurb` / `profileBadges` — the labels a profile card shows, derived from `systemPrompt` / `deny` / `model` / `secrets` (nothing added to `Profile`) — plus `defaultAgentName(profile, cwd)`, the name proposed for a new agent (profile → directory → `"agent"`), and `isManagedProfile` — the server-owned roles (`Shadok-Tweak`) that must never appear in a list where one PICKS a profile, since their prompt is rewritten at every boot. ESM: loaded by the browser AND imported by `test/profile-card.test.ts`. |
 | `public/tour-steps.js` | Pure `TOUR_STEPS` / `visibleSteps` / `unionRect` / `bubblePlacement` — the guided tour's step data and geometry. A step whose target is not on screen is **dropped, never faked** (an empty cockpit has no agent menu), so the counter reads over the RETAINED steps. **An empty rect is not a point at the origin**: `unionRect` DROPS `{0,0,0,0}` members and returns null only when none survive. Without that, `reflowHeaderTools` parking five tool buttons in the closed ⋯ menu below 640px pinned the union's `Math.min` to zero and stretched the toolbar spotlight from the viewport's corner across the header — measured `top -6px, left -6px, 367x51` — framing the brand and the gauges while the body described buttons that were not on screen. Same family as `.hdr-tools`, which is `display: contents` on desktop and has **no box at all**; that one dropped its step honestly, this one kept it and lied. Dropping empties is also what lets one step carry BOTH layouts' selectors (`["#tabbar", "#chanSelect"]`), which is how the phone stopped losing every step that mentions agents — it used to get 3 of 6. Two copy rules the tests hold, both learned from real drift: **never promise an order** ("left to right" put the ledger's name on the profiles icon the day the ledger was inserted) and **never name a position** ("at the bottom" describes the column, and the phone's `<select>` has no bottom and no *Tweak Shadok-AI*). ESM: loaded by the browser AND imported by `test/tour-steps.test.ts`. |
 | `src/claude-models.ts` | Which models THIS Claude Code build supports, **read out of the binary's strings** — one scan per upgrade, cached on the binary's path+size+mtime. There is no CLI command that enumerates models (and `claude models` is NOT a subcommand: it is taken as a PROMPT and answered, which costs a turn), so the names come from where they live. `parseModelNames` is deliberately NARROW because a strings dump GLUES adjacent bytes and mints plausible rubbish — this binary really contains `claude-haiku-3-55` and `claude-fable-5-mythos-5` — so only `claude-<family>-<major>[-<minor>]` with a single-digit minor survives, and `-v1` / dated forms are dropped as the same model spelled longer. Known limit, written down rather than rediscovered: a two-digit minor would be skipped, which is the price of keeping `3-55` out; the family aliases never depend on the scan. **An empty result is never cached — not in the file and not in the memo** (`memo?.length`, since an empty array is truthy): a failed scan is the NORMAL case during a claude-code upgrade (invariant 32), and memoising one froze the picker family-only for the life of the process. Pure cores tested. |
+| `public/effort-choice.js` | Pure `EFFORT_CHOICES` / `effortLabel` — the thinking-effort levels a picker offers (`--effort`). A PICKER and not a free-text field because the CLI **ignores** an unknown level with a warning instead of refusing it, so a typo would be a silent no-op. `test/effort.test.ts` holds its ids equal to the server's `EFFORT_LEVELS` whitelist, which is what keeps the two lists from drifting. |
 | `public/model-choice.js` | Pure `MODEL_CHOICES` / `composeModel` / `isLongContext` — the model a SINGLE agent runs on, picked in the creation popin and overriding its profile's. The choices are ALIASES (`opus`, `sonnet`…), never pinned model names: an alias resolves to the latest model of its family, while a pinned name rots — the profile panel still suggests `claude-opus-4-8`, current when it was written and stale now. The long window is a `[1m]` SUFFIX on the setting, not a model of its own, which is why it is a checkbox beside the picker and why `composeModel("", true)` is null: a bare `[1m]` is invalid, and silently dropping the flag would leave the box ticked over an agent on the standard window. `test/model-choice.test.ts` pins the round trip against `windowForModel`, since the gauge reads that same suffix back (invariant 22). ESM: loaded by the browser AND imported by the tests. |
 | `public/gauge-dial.js` | Pure `dialPos` / `dialAngle` / `dialColor` / `arcSegments` / `dialTitle` — the geometry of the 240° quota dial, whose centre is the ideal pace and whose right end is exhaustion. ESM: loaded by the browser AND imported by `test/gauge-dial.test.ts`. |
 | `public/ledger-view.js` | Pure `filterLedger` / `ledgerFacets` / `ledgerAge` / `ldgNorm` + the `LEDGER_AGES` / `LEDGER_SORTS` option lists — how the read-only ledger viewer narrows a table that is 144 rows here and 498 on a sibling instance one day later. Client-side over rows already in hand (`GET /ledger` sends the table whole), so no endpoint and no round trip per keystroke. Four rules carry it. Search is accent-INSENSITIVE, because a sibling instance's rows are written in French and `hopital` has to find `hôpital` — a box that fails exactly the people whose rows need it is worse than none. The haystack includes the **id**, since that is the handle the pushed block and the CLI both print, so pasting `a1b2` back must land on the row it names (the viewer also SHOWS it now, and it was the one place that did not). An age window reads `verifiedAt ?? updatedAt` like everything else that judges staleness, and **never drops an undated row** — hiding what we know nothing about is how it stops existing. And the chips are counted from the data, never from a fixed list: `status` is free text, so a hardcoded set would silently hide whatever word no one predicted. ESM: loaded by the browser AND imported by `test/ledger-view.test.ts`. |
@@ -208,7 +209,11 @@ PUT `/channels` cannot touch it),
 `set-model` (`model` — an alias like `opus`, optionally `[1m]`-suffixed, or
 `null` = the profile's; the twin of `set-profile` for the per-agent model, shown
 and changed in the agent menu. `--model` is a spawn arg, so it ALWAYS respawns to
-apply — no "at next reload" gap. `model` is `SERVER_OWNED` too), `stop`
+apply — no "at next reload" gap. `model` is `SERVER_OWNED` too),
+`set-effort` (`effort` — a level from `EFFORT_LEVELS`, or `null` to hand it back
+to the profile; the same shape as `set-model`, for the same reason: `--effort` is
+a spawn arg, so it ALWAYS respawns. An unknown level is refused OUT LOUD, because
+the CLI itself would only warn and silently run at the default), `stop`
 (`sessionId?` — kills a specific channel, so the UI can remove a zombie).
 
 **server → client:** `ready` (carries `instanceKey` — which instance answers this origin, so a stale tab whose port was taken over detects the swap, invariant 35), `working` (carries `elapsedMs` — how long the turn has been running; the client anchors on the DURATION and never on a server instant, or the stopwatch is off by the whole gap between the two clocks), `turn-done`, `stream-text`,
@@ -1163,6 +1168,39 @@ Auth section of `docs/architecture.md`).
     the terminal view writes keys straight to the pane and kept working, the
     wedged panes had no channel and were absent from `/live`, and nothing was
     logged. Measure the server (`time curl /version`) before suspecting the page.
+
+40. **A setting the CLI merely WARNS about is one we must validate ourselves —
+    and `--effort` is one.** `claude --effort bogus` does not fail: it prints
+    `Warning: Unknown --effort value 'bogus' — ignoring it and using the default
+    effort. Valid values: low, medium, high, xhigh, max.` and runs at the
+    default. That warning goes to a tmux pane nobody reads, so an unvalidated
+    level makes the cockpit show a thinking effort the agent is not running at —
+    visible only on the bill. Hence three gates for one field: a `<select>` built
+    from `EFFORT_CHOICES` rather than a free-text box (the `Model` field next to
+    it IS free text, because any model string is either valid or loudly
+    refused), an `isEffortLevel` whitelist on `PUT /profiles` and `set-effort`,
+    and a last check inside `profileArgs` — the single place every spawn passes
+    through. There, a bad value is DROPPED rather than replaced by the role's:
+    falling back would run the agent at an effort nobody chose. The class
+    generalises to any future flag: before exposing one, check whether the CLI
+    refuses a bad value or absorbs it, because only the first case lets us skip
+    validating. **And there is no thinking on/off to expose at all** — on current
+    models thinking is always on, and `alwaysThinkingEnabled: false` /
+    `MAX_THINKING_TOKENS=0` are ignored by them, so such a toggle would be a
+    control that changes nothing.
+
+41. **A per-client message spelled by hand in several places WILL drift — the
+    `profile` message had already.** Its two connect-time `send`s wrote the
+    object inline and omitted `model`, so a reconnecting tab reset its model to
+    `null` and the agent menu announced "profile default" over an agent running
+    on Opus, until some unrelated change rebroadcast it. Nothing was wrong at the
+    only site anyone reads, `broadcastProfile`. Adding `effort` beside it would
+    have doubled the bug, so there is now ONE builder (`profileMessage`) and the
+    three call sites use it. The same class, client-side: the secrets panel
+    rebuilds a profile body BY HAND to toggle one secret, and every field missing
+    from that body is silently reset — which is why `effort` had to be added
+    there too, or ticking a secret would have wiped a role's effort.
+
 
 ## Conventions
 

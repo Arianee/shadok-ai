@@ -200,6 +200,9 @@ export function profileSaveBody(form, state) {
     name: form.name,
     deny: form.deny ?? [],
     model: form.model ?? "",
+    // "" is the sentinel for "no --effort flag"; the server refuses anything
+    // that is neither that nor a known level.
+    effort: form.effort ?? "",
     secrets: form.secrets ?? [],
   };
   if (!state.tracked || state.forked) body.systemPrompt = form.prompt ?? "";
