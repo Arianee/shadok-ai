@@ -38,6 +38,11 @@ export interface Channel {
    *  it would silently move a running agent to another model. Absent means the
    *  profile decides, which is the default and emits no flag at all. */
   model?: string | null;
+  /** How hard THIS agent thinks, overriding its profile's effort. Stored for
+   *  the same reason `model` is: it is a spawn flag, so a resume or a restart
+   *  that forgot it would silently drop a running agent back to the default
+   *  effort. Absent means the profile decides, and emits no flag at all. */
+  effort?: string | null;
   /** The channel that spawned this one, or one attached to it by hand. Only
    *  this parent is told when the agent finishes, blocks on a question or dies
    *  — without that scoping a chatty channel would wake a boss on every turn,
@@ -77,7 +82,7 @@ export function isMirrored(c: Channel): boolean {
  * only resume its own agents" — which broke any multi-step remote exchange
  * (the holder's first resume ran; the browser's next sync wiped the owner). Same
  * loss as `profile`/`parent` before they were listed here. */
-const SERVER_OWNED = ["cwd", "branch", "repo", "telegram", "profile", "model", "parent", "home", "createdByPeer"] as const;
+const SERVER_OWNED = ["cwd", "branch", "repo", "telegram", "profile", "model", "effort", "parent", "home", "createdByPeer"] as const;
 
 /**
  * Pure: is this channel the environment's home base — pinned and never closable?

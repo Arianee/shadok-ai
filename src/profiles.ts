@@ -32,6 +32,9 @@ export interface Profile {
   /** Names of vault secrets to inject as env (references, not values). */
   secrets?: string[];
   model?: string;
+  /** How hard agents of this role think before answering (`--effort`). One of
+   *  `EFFORT_LEVELS`; absent means pass no flag and take the CLI's default. */
+  effort?: string;
   /** May this agent answer a dialog pending on one of ITS OWN children?
    *  Opt-in on purpose: answering a child's permission prompt lets a
    *  READONLY_DENY agent authorise a child to do what it cannot do itself, so
@@ -382,7 +385,11 @@ export function removeProfile(name: string): void {
  */
 export const COCKPIT_DENY = ["Artifact"] as const;
 
-export function profileArgs(profile?: Profile | null, modelOverride?: string | null): string[] {
+export function profileArgs(
+  profile?: Profile | null,
+  modelOverride?: string | null,
+  effortOverride?: string | null,
+): string[] {
   const args: string[] = [];
   if (profile?.systemPrompt?.trim()) args.push("--append-system-prompt", profile.systemPrompt.trim());
   const deny = [
@@ -405,6 +412,15 @@ export function profileArgs(profile?: Profile | null, modelOverride?: string | n
   // profile at all, and returning [] on a null profile would have dropped it.
   const model = modelOverride?.trim() || profile?.model?.trim();
   if (model) args.push("--model", model);
+  // ONE place emits --effort, and the agent's own choice wins over the role's —
+  // the same split as --model just above, for the same reasons.
+  //
+  // Validated HERE and not only at the edges, because this is the last gate
+  // before the CLI and the CLI has none: it ignores an unknown level with a
+  // warning. A bad value is dropped rather than replaced by the role's, since
+  // falling back would run the agent at an effort nobody picked.
+  const wanted = effortOverride?.trim() || profile?.effort?.trim();
+  if (wanted && isEffortLevel(wanted)) args.push("--effort", wanted);
   return args;
 }
 
@@ -424,6 +440,30 @@ export const PERMISSION_MODES = [
   "bypassPermissions",
 ] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
+
+/**
+ * How much the model thinks before answering (`claude --effort`), in increasing
+ * order. This exact set is what the CLI prints as valid (verified on 2.1.300).
+ *
+ * There is deliberately NO on/off here, because there is no longer one to
+ * offer: on current models thinking is always on, and the old switches
+ * (`alwaysThinkingEnabled: false`, `MAX_THINKING_TOKENS=0`) are ignored by
+ * them. Effort is the whole dial, so a "thinking" toggle in the cockpit would
+ * be a control that changes nothing.
+ */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+/**
+ * Whether `e` is an effort level we recognize.
+ *
+ * This is a whitelist rather than a passthrough because the CLI does not refuse
+ * an unknown value — it warns and uses the default. So an unvalidated typo runs
+ * the agent at an effort nobody chose, with the UI showing the one they picked.
+ */
+export function isEffortLevel(e: unknown): e is EffortLevel {
+  return typeof e === "string" && (EFFORT_LEVELS as readonly string[]).includes(e);
+}
 
 /** Whether `m` is a permission mode we recognize. */
 export function isPermissionMode(m: string): m is PermissionMode {

@@ -83,6 +83,12 @@ Enter to skip; you can add it later from the web UI).
 - **Interactive dialogs** — the TUI's permission prompts and multiple-choice
   questions become clickable buttons in the chat, and an inline keyboard in
   Telegram.
+- **Thinking effort** — how hard an agent thinks before answering (`--effort`),
+  set on a role in the Profiles panel and overridable per agent from its menu.
+  Higher levels cost more tokens, and thinking tokens are billed even when they
+  stay collapsed, so the picker says so. There is deliberately no thinking
+  on/off switch: current models always think, and the settings that used to
+  disable it are ignored by them — a toggle would change nothing.
 - **Agent profiles** — a named bundle of role prompt, permission guardrails
   (e.g. forbid `git commit`), model, and which secrets to inject. Applied at
   spawn, remembered across resume.

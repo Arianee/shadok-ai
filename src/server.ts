@@ -176,6 +176,7 @@ import {
   profileArgs,
   permissionModeArgs,
   isPermissionMode,
+  isEffortLevel,
   envVarsNote,
   seedDefaultProfiles,
   migrateToTracking,
@@ -1793,7 +1794,13 @@ app.put("/profiles", (req, res) => {
     allow: Array.isArray(b.allow) ? b.allow.filter((x: unknown) => typeof x === "string") : undefined,
     secrets: Array.isArray(b.secrets) ? b.secrets.filter((x: unknown) => typeof x === "string") : undefined,
     model: typeof b.model === "string" && b.model.trim() ? b.model.trim() : undefined,
+    // Refused rather than stored: the CLI ignores an unknown --effort with a
+    // warning, so a bad level saved here would run every agent of this role at
+    // the default effort while the panel showed the one that was picked.
+    effort: isEffortLevel(b.effort) ? b.effort : undefined,
   };
+  if (b.effort !== undefined && b.effort !== "" && !isEffortLevel(b.effort))
+    return res.status(400).json({ error: `unknown effort level: ${String(b.effort)}` });
   upsertProfile(p);
   res.json(loadProfiles().map((x) => ({ ...x, origin: promptOrigin(x, shippedProfile(x.name)) })));
 });
@@ -2437,6 +2444,12 @@ type ClientMessage =
        *  Omitted means the profile decides — the picker's default, and what
        *  every client that ignores this field keeps doing. */
       model?: string;
+      /** How hard THIS agent thinks, overriding its profile's: one of
+       *  `EFFORT_LEVELS`. Omitted means the profile decides — the picker's
+       *  default, and what every client ignoring this field keeps doing. An
+       *  unknown level is DROPPED rather than passed on: the CLI would only
+       *  warn and run at the default. */
+      effort?: string;
       /** The channel that launched this one. pilotctl sends its own
        *  SHADOK_SESSION_ID here, so the link needs no configuring. Refused on a
        *  cycle / unknown parent / cap, exactly like `set-parent`. */
@@ -2483,6 +2496,7 @@ type ClientMessage =
    *  Like `profile`, `model` is SERVER_OWNED on the channel, so this is the only
    *  legitimate path. A model is a spawn arg, so this ALWAYS respawns to apply. */
   | { type: "set-model"; model: string | null }
+  | { type: "set-effort"; effort: string | null }
   /** Attach this channel under another (or detach with null), so that parent —
    *  and only that parent — is told when this agent finishes, blocks on a
    *  question, or dies. Like `profile`, `parent` is SERVER_OWNED, so this is
@@ -2635,6 +2649,7 @@ function makePilot(
   args: string[],
   profileName?: string | null,
   model?: string | null,
+  effort?: string | null,
 ): Pilot {
   // A worktree is a brand-new directory, so it carries a brand-new trust
   // dialog. Seed it before the process exists, not after it is stuck on it.
@@ -2673,7 +2688,7 @@ function makePilot(
   const fullArgs = [
     ...args,
     ...permissionModeArgs(permissionMode),
-    ...profileArgs(effectiveProfile(profile), model),
+    ...profileArgs(effectiveProfile(profile), model, effort),
     ...(note ? ["--append-system-prompt", note] : []),
     ...(sp ? ["--append-system-prompt", sp] : []),
     ...(lr ? ["--append-system-prompt", lr] : []),
@@ -2780,6 +2795,8 @@ interface Live {
    *  between a stored change and the restart that applies it — that gap is what
    *  the UI shows as "(at next reload)". */
   appliedProfile?: string | null;
+  /** The effort THIS agent runs at, overriding its profile's (`--effort`). */
+  effort?: string;
   /** Reclaim timer armed when no client is attached. */
   idleTimer: ReturnType<typeof setTimeout> | null;
   /** Token usage per assistant message id (final counts win), from the .jsonl. */
@@ -2896,6 +2913,7 @@ async function restartSession(s: Live): Promise<void> {
     hasTranscript ? ["--resume", s.id] : ["--session-id", s.id],
     s.profile,
     s.model,
+    s.effort,
   );
   s.appliedProfile = s.profile;   // the new process carries the desired profile
   await attachPilot(s);
@@ -2921,14 +2939,31 @@ async function restartSession(s: Live): Promise<void> {
 
 /** Tells every attached client (other tabs, other devices) both the desired and
  *  the running profile — the pair is what lets the UI show "(at next reload)". */
-function broadcastProfile(s: Live) {
-  broadcast(s, {
-    type: "profile", profile: s.profile ?? null, applied: s.appliedProfile ?? null,
+/**
+ * This agent's identity as the clients see it: the desired/in-force profile
+ * pair, plus the two spawn settings the agent menu shows and changes.
+ *
+ * ONE builder, because the two connect-time `send`s used to spell this message
+ * by hand and omitted `model` — so a reconnecting tab set its model back to
+ * null and the menu showed "profile default" over an agent running on Opus,
+ * until some unrelated change rebroadcast it. Adding a second such field would
+ * have doubled that bug.
+ */
+function profileMessage(s: Live) {
+  return {
+    type: "profile" as const,
+    profile: s.profile ?? null,
+    applied: s.appliedProfile ?? null,
     // The model this agent runs on (an alias / `[1m]` setting / full name, or
-    // null = the profile's). Carried on the same identity message so the tab menu
-    // can show and change it.
+    // null = the profile's), and how hard it thinks (`--effort`, null = the
+    // profile's). Both are spawn args, hence both on the identity message.
     model: s.model ?? null,
-  });
+    effort: s.effort ?? null,
+  };
+}
+
+function broadcastProfile(s: Live) {
+  broadcast(s, profileMessage(s));
 }
 
 function destroySession(s: Live) {
@@ -3067,8 +3102,9 @@ async function createSession(
   worktree: Worktree | null = null,
   profile: string | null = null,
   model: string | null = null,
+  effort: string | null = null,
 ): Promise<Live> {
-  const pilot = makePilot(id, cwd, args, profile, model);
+  const pilot = makePilot(id, cwd, args, profile, model, effort);
   // Resumed sessions start with what the transcript already consumed.
   const seededUsage = scanUsage(sessionFilePath(cwd, id));
   const contextWindow = windowForModel(sessionModelSetting(profile, model));
@@ -3078,6 +3114,7 @@ async function createSession(
     pilot,
     profile,
     appliedProfile: profile,   // the process we just spawned did receive it
+    effort: effort ?? undefined,
     clients: new Set(),
     busy: false,
     lastPrompt: "",
@@ -3864,7 +3901,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
               ...(session.worktree ? { branch: session.worktree.branch } : {}),
             });
             send({ type: "tokens", tokens: tokenTotals(session) });
-            send({ type: "profile", profile: session.profile ?? null, applied: session.appliedProfile ?? null });
+            send(profileMessage(session));
             if (session.contextPct !== null) send({ type: "context", pct: session.contextPct });
             if (session.shells || session.monitors)
               send({ type: "background", shells: session.shells, monitors: session.monitors });
@@ -3900,6 +3937,22 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             const stored = loadChannels().find((c) => c.sessionId === id)?.model;
             if (stored != null) model = stored;
           }
+          // The effort, resolved the same way and for the same reason as the
+          // model: it is a spawn flag, so a resume that forgot it would quietly
+          // drop a running agent back to the default effort. The registry has
+          // the last word (invariant 1), never the client. An unrecognised
+          // level is dropped and logged rather than refused — killing a spawn
+          // over a thinking setting would be a worse outcome than one that runs
+          // at the default, and the CLI itself would only have warned.
+          let effort: string | null = msg.effort?.trim() || null;
+          if (effort !== null && !isEffortLevel(effort)) {
+            console.log(`agent: ${id.slice(0, 8)} effort ignored (unknown level: ${effort})`);
+            effort = null;
+          }
+          if (resumed) {
+            const stored = loadChannels().find((c) => c.sessionId === id)?.effort;
+            if (stored != null) effort = stored;
+          }
           // Who launched this agent. Validated exactly like `set-parent` — a
           // cycle costs the same either way — but a refusal here only DROPS the
           // link instead of failing the start: the agent itself is fine, and
@@ -3919,7 +3972,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             !resumed && typeof msg.name === "string" && msg.name.trim()
               ? msg.name.trim().slice(0, 80)
               : undefined;
-          session = await createSession(id, effectiveCwd, args, worktree, profile, model);
+          session = await createSession(id, effectiveCwd, args, worktree, profile, model, effort);
           session.clients.add(ws);
           if (resumed) {
             const turns = historyWithOffers(loadHistory(effectiveCwd, id), id);
@@ -3964,6 +4017,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             // end-to-end run found it. `test/agent-model.test.ts` asserts the
             // value comes back out of the registry, not that it compiles.
             ...(model !== null ? { model } : {}),
+            // ASSERT-only for the same reason, and the resume path above reads
+            // it back: a spawn-time effort that was never stored would vanish
+            // the first time the agent is reopened.
+            ...(effort !== null ? { effort } : {}),
             // The form's choice, recorded as soon as we're `ready` — that's
             // where the Telegram loop reads it. Absent (a client that ignores
             // the field) → decide nothing, and `isMirrored` falls back to the
@@ -3986,7 +4043,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             ...(initialName ? { name: initialName } : {}),
           });
           send({ type: "tokens", tokens: tokenTotals(session) });
-          send({ type: "profile", profile: session.profile ?? null, applied: session.appliedProfile ?? null });
+          send(profileMessage(session));
             if (session.contextPct !== null) send({ type: "context", pct: session.contextPct });
             if (session.shells || session.monitors)
               send({ type: "background", shells: session.shells, monitors: session.monitors });
@@ -4346,6 +4403,25 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           s.model = model ?? undefined;
           upsertChannel({ sessionId: s.id, model });
           await restartSession(s);        // respawns with the new --model (s.model)
+          broadcastProfile(s);            // running == desired now
+          break;
+        }
+        case "set-effort": {
+          // How hard this agent thinks. `--effort` is a spawn arg, so like
+          // `--model` a running process cannot change mid-flight: this ALWAYS
+          // respawns rather than recording a wish, because an effort shown as
+          // running while it is not is the failure this feature would be.
+          if (!session) return fail("no session started");
+          const s = session;
+          const wanted = msg.effort?.trim() || null;
+          // Refuse out loud. The CLI would merely warn and fall back to the
+          // default, so a typo accepted here runs the agent at an effort nobody
+          // chose while the picker shows the one they clicked.
+          if (wanted !== null && !isEffortLevel(wanted))
+            return fail(`unknown effort level: ${wanted}`);
+          s.effort = wanted ?? undefined;
+          upsertChannel({ sessionId: s.id, effort: wanted });
+          await restartSession(s);        // respawns with the new --effort
           broadcastProfile(s);            // running == desired now
           break;
         }
