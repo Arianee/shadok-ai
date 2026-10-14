@@ -174,6 +174,12 @@ Enter to skip; you can add it later from the web UI).
   otherwise just print a local path you cannot open. **Artifacts are denied**
   cockpit-wide for the same reason — a page on claude.ai is not the file you
   asked for (`SHADOK_ALLOW_ARTIFACTS=1` lifts it).
+- **Compaction summaries, folded away** — when Claude Code runs out of context
+  it compacts the conversation and writes a long "This session is being
+  continued…" summary as the first message of what follows. Shown in full it
+  buried the chat, so the cockpit folds it into a collapsible **Context summary**
+  box: collapsed by default, one click to read it, capped and scrolling even when
+  open. It is still real history — just out of the way.
 - **Diff panel** — what an agent actually changed, against its base.
 - **What an agent left running, on its tab** — a turning ⏳ for background
   shells, a still 👁 for monitors, each with its count past one. Claude Code

@@ -1070,6 +1070,34 @@
     font-style: italic;
     padding: 2px 0;
   }
+  /* ── Compaction summary ──────────────────────────────────
+     Claude Code's "This session is being continued…" block, folded away so it
+     doesn't bury the chat. Collapsed by default; even expanded it is capped and
+     scrolls, so a 14 KB summary can never take over the thread. */
+  .turn.compaction { max-width: 92%; }
+  .compaction-box {
+    border: 1px dashed var(--line); border-radius: 8px;
+    background: var(--bg-inset); overflow: hidden;
+  }
+  .compaction-sum {
+    cursor: pointer; list-style: none; user-select: none;
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 10px; font-size: 12.5px; color: var(--text-dim);
+  }
+  .compaction-sum::-webkit-details-marker { display: none; }
+  .compaction-sum::before {
+    content: "▸"; color: var(--amber); font-size: 11px; transition: transform 0.12s;
+  }
+  .compaction-box[open] > .compaction-sum::before { transform: rotate(90deg); }
+  .compaction-sum:hover { color: var(--amber); }
+  .compaction-sum .time { margin-left: auto; font-style: normal; }
+  .compaction-body {
+    border-top: 1px solid var(--line);
+    max-height: 340px; overflow-y: auto;
+    margin: 0; border-radius: 0;
+    font-size: 13px;
+  }
+  .compaction-body.md { padding: 8px 10px; }
   /* ── Activity block ──────────────────────────────────────
      A run of tool calls between two pieces of assistant text. Folds at three
      levels — output, same-tool run, whole block — each driven by data-folded.
@@ -4771,6 +4799,41 @@
     return bubble;
   }
 
+  /**
+   * A compaction summary, folded into a collapsible box. Claude Code writes a
+   * long "This session is being continued…" block as a user message when it
+   * compacts; shown as a full bubble it buries everything, so it is collapsed by
+   * default and expands on click. The body is sanitised like any transcript
+   * markdown (invariant 13), even though this text is the model's own summary.
+   */
+  function addCompactionCard(tab, text, at) {
+    if (Number.isFinite(at)) { tab.lastMsgAt = at; renderLastAt(tab); }
+    const turn = document.createElement("div");
+    turn.className = "turn compaction";
+    const det = document.createElement("details");
+    det.className = "compaction-box";
+    const sum = document.createElement("summary");
+    sum.className = "compaction-sum";
+    sum.textContent = "🗜 Context summary — earlier conversation compacted";
+    const time = fmtTime(at);
+    if (time) sum.appendChild(time);
+    det.appendChild(sum);
+    const body = document.createElement("div");
+    body.className = "compaction-body bubble";
+    if (text && window.marked && window.DOMPurify) {
+      body.classList.add("md");
+      body.innerHTML = DOMPurify.sanitize(marked.parse(text));
+    } else {
+      body.textContent = text || "";
+    }
+    det.appendChild(body);
+    turn.appendChild(det);
+    if (text) addCopyButton(turn, text);
+    tab.transcriptEl.appendChild(turn);
+    pinBottom(tab);
+    return body;
+  }
+
   /** The URL that serves a dropped / pasted / Telegram media file, by basename
    *  (the server scopes it to MEDIA_DIR). */
   function mediaUrl(p) {
@@ -5978,6 +6041,10 @@
             // A file the agent delivered (SendUserFile) — its card survives the
             // reload so the download / image stays reachable.
             addFileCard(t, h.files || [], h.at);
+          } else if (h.role === "user" && h.compaction) {
+            // A compaction summary: a huge "This session is being continued…"
+            // block. Fold it into a collapsible box so it doesn't bury the chat.
+            addCompactionCard(t, h.text, h.at);
           } else if (h.role === "user") {
             // Who sent it, recovered from the stripped ⟦…⟧ header, through the
             // SAME echoAuthor the live echo uses: "Ada · telegram"
