@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { upsertEntry, searchEntries, ageDays, resolveId, normEntity, rowKind, KINDS } from "./ledger-core.mjs";
+import { upsertEntry, searchEntries, ageDays, resolveId, normEntity, rowKind, KINDS, LABEL_MAX } from "./ledger-core.mjs";
 
 const FILE =
   (process.env.SHADOK_LEDGER_FILE || "").trim() ||
@@ -144,6 +144,16 @@ if (cmd === "check") {
   const row = byId ? resolveId(rows, f.id) : rows.find((r) => normEntity(r.entity) === normEntity(f.entity));
   const k = rowKind(row);
   console.log(`recorded: ${row.entity} — ${row.status}${k === "task" ? "" : ` · ${k}`} [${row.id}]`);
+  // Say it, don't enforce it: the row is already saved (a refused write is a
+  // lost fact) and the full label stays in the table. But the delta pushed to
+  // siblings only carries the first LABEL_MAX characters of it, and a label
+  // that grew into a sentence is what makes a 9-row delta name one row.
+  if (row.entity.length > LABEL_MAX) {
+    console.log(
+      `note: that label is ${row.entity.length} characters — a label NAMES the topic, the note says what happened. ` +
+        `Only the first ${LABEL_MAX} reach the ⟦ledger⟧ block your siblings are pushed.`,
+    );
+  }
 } else if (cmd === "list") {
   const rows = searchEntries(load(), "").strong;
   console.log(rows.length ? rows.map((e) => fmt(e, now)).join("\n") : "(ledger empty)");

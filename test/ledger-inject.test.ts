@@ -126,9 +126,10 @@ test("headline: a bare dot is not a sentence boundary — this table is full of 
 });
 
 test("headline: a long sentence is truncated on a word, with an ellipsis", () => {
-  const long = "Supersede, not append, so the size of the table is bounded by the number of live topics and never by activity, which is the founding premise.";
+  const long =
+    "Supersede, not append, so the size of the table is bounded by the number of live topics and never by activity, which is the founding premise of the whole thing and the reason it stays cheap.";
   const h = headline(long);
-  assert.ok(h.length <= 121, `too long: ${h.length}`); // 120 + the ellipsis
+  assert.ok(h.length <= 161, `too long: ${h.length}`); // 160 + the ellipsis
   assert.ok(h.endsWith("…"));
   assert.ok(!h.includes("  ")); // broke on a word, no dangling space
   // an explicit cap is honoured (the recurring per-turn cost is the reason it exists)
@@ -152,8 +153,9 @@ test("formatLedgerBlock: a headline per row, and the kind only when it is not a 
   // `decided` with no stored kind still reads as a decision (nothing was rewritten)
   assert.ok(block.includes("• [c3d4] supersede, not append — decided · decision ↳"));
   // a task carries no tag — it is nearly the whole table, so it would be noise
-  assert.ok(block.endsWith("• [e5f6] no note here — open"));
   assert.ok(!block.includes("· task"));
+  // the fourth row is past ROWS_TARGET, so it is the overflow — by its id
+  assert.ok(block.endsWith("• (+1 : e5f6 — run: ledger list)"), block);
   // a row with no note gets no continuation line
   assert.equal((block.match(/↳/g) || []).length, 3);
 });
@@ -194,7 +196,9 @@ test("the block is ONE LINE and within budget — a fourth line neutralises the 
   // multi-line block the user's message is INSIDE that wrapper and stops being
   // an instruction; an agent answered "I haven't acted on that line" to a direct
   // order. Measured on 486 real prompts: 0 of 324 at ≤3 lines, ~30% of 162 at ≥4.
-  // A prompt is ⟦web⟧ + message, so the block gets exactly one line.
+  // Since #261 the block is its own paste and is judged alone by the binary's
+  // own rule (`body.length <= 800 && newlines <= 2`), so one line is thrift and
+  // headroom now — and the second line of that paste stays free on purpose.
   const rows = Array.from({ length: 8 }, (_, i) => ({
     id: `id0${i}`,
     entity: `a reasonably long entity name number ${i} as they really are`,
@@ -206,19 +210,19 @@ test("the block is ONE LINE and within budget — a fourth line neutralises the 
   for (const n of [1, 2, 3, 5, 8]) {
     const block = formatLedgerBlock(rows.slice(0, n), 20);
     assert.equal(block.split("\n").length, 1, `${n} rows must stay on ONE line`);
-    assert.ok(block.length <= 640, `${n} rows: ${block.length} chars is past the ceiling`);
+    assert.ok(block.length <= 700, `${n} rows: ${block.length} chars is past the ceiling`);
     assert.ok(hasLedgerBlock(block)); // and still detected, so it is still stripped
     assert.equal(stripLedgerBlock(`${block}\n⟦web · x⟧\nhi`), "⟦web · x⟧\nhi");
   }
   // rows that do not fit become the overflow pointer, never a second line
-  assert.match(formatLedgerBlock(rows, 20), /\(\+\d+ more — run: ledger list\)$/);
+  assert.match(formatLedgerBlock(rows, 20), /\(\+\d+ more.* — run: ledger list\)$/);
   // a single oversized row is still carried — an empty block would announce a
   // delta and name nothing, which is worse than a long line
   const huge = [{ id: "a1b2", entity: "x".repeat(900), status: "open", updatedAt: 1 }];
   const one = formatLedgerBlock(huge, 1);
   assert.equal(one.split("\n").length, 1);
   assert.ok(one.includes("[a1b2]"));
-  assert.ok(one.length <= 640);
+  assert.ok(one.length <= 700);
 });
 
 test("stripLedgerBlock eats the gap the paste wrapper leaves, or the ⟦platform⟧ header shows", () => {
@@ -233,4 +237,82 @@ test("stripLedgerBlock eats the gap the paste wrapper leaves, or the ⟦platform
   const bare = stripLedgerBlock(peeled);
   assert.ok(bare.startsWith("⟦web · "), `header must lead, got ${JSON.stringify(bare.slice(0, 20))}`);
   assert.equal(stripPromptMeta(bare), user);
+});
+
+/* --------------------------------------------------------------------------
+ * Budget: what the block spends it on.
+ * Spec: docs/superpowers/specs/2026-10-14-ledger-block-budget.md
+ * ------------------------------------------------------------------------ */
+
+/** A delta as they really arrive: short-ish labels, a note with a real first
+ *  sentence, a source. `n` rows of it. */
+function delta(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `a${i}b${i}`,
+    entity: `an entity named the way agents name them, number ${i}`,
+    status: i % 2 ? "resolved" : "open",
+    source: "PR#1203",
+    note: `Row ${i} moved and this first sentence says what happened to it. Detail after.`,
+    updatedAt: i,
+  }));
+}
+
+test("the block names several rows — a headline must not outbid the next row's existence", () => {
+  // The first version appended row i's headline before testing whether row i+1
+  // fitted, so a delta of 2, 5, 7 or 9 rows named exactly ONE of them, every
+  // time, while 52 characters of the budget went unspent. `ledger list` gives
+  // the reader the notes back in one call; nothing gives back a row they were
+  // never told existed.
+  for (const n of [2, 3, 5, 8]) {
+    const block = formatLedgerBlock(delta(n), n);
+    const named = (block.match(/ • \[/g) ?? []).length;
+    assert.ok(named >= Math.min(n, 3), `${n} rows: only ${named} named — ${block.length} chars`);
+    assert.equal(block.split("\n").length, 1);
+  }
+  // and the detail is still there for the rows that fitted
+  assert.ok(formatLedgerBlock(delta(3), 3).includes("↳ Row 0 moved"));
+});
+
+test("the overflow carries the ids, and never claims to carry more than it has", () => {
+  // An id is the handle `record --id` takes and `check` resolves, so a reader
+  // that recognises one can act on it; `+8 more` leaves it with all of them or
+  // none. But the delta is CAPPED, so `total` can exceed the rows we were
+  // handed — announcing `+8 : <7 ids>` would quietly lose one.
+  const rows = delta(8);
+  const whole = formatLedgerBlock(rows, 8); // we hold every changed row
+  const unnamed = 8 - (whole.match(/ • \[/g) ?? []).length;
+  assert.match(whole, new RegExp(`\\(\\+${unnamed} : ([0-9a-z]+ ){${unnamed - 1}}[0-9a-z]+ — run`));
+  for (const r of rows.slice(8 - unnamed)) assert.ok(whole.includes(r.id), `${r.id} missing`);
+
+  const capped = formatLedgerBlock(rows, 57); // 57 changed, 8 handed to us
+  assert.match(capped, /\(\+\d+ more, \d+ newest: /);
+  const claimed = Number(capped.match(/\(\+(\d+) more/)![1]);
+  assert.equal(claimed, 57 - (capped.match(/ • \[/g) ?? []).length);
+});
+
+test("a label is capped in the BLOCK, never in the table — the id stays the handle", () => {
+  // Labels grew into sentences once the delta started carrying a headline, and
+  // on one instance that took the rendered row to a 156-character median: a
+  // 9-row delta named one row. The cap is at render time so it holds whatever
+  // any agent writes; `check` and `list` still print the label whole.
+  const long = "x".repeat(300);
+  const block = formatLedgerBlock([{ id: "a1b2", entity: long, status: "open", updatedAt: 1 }], 1);
+  assert.ok(!block.includes(long), "the whole label must not reach the block");
+  assert.ok(block.includes("[a1b2]"), "the handle survives — it is how you quote the row");
+  assert.ok(block.includes("…"), "and the truncation is visible");
+  assert.ok(block.length < 200, `a 300-char label still cost ${block.length}`);
+});
+
+test("headline: 160, because a sentence cut mid-way can say the opposite", () => {
+  // Measured: a real `decision` row whose first sentence is 126 characters was
+  // cut at 120 to "…aucune action directe déclenchée par…", losing the "par un
+  // mail" that carried the decision. 19% of that table's notes were cut at 120.
+  const s126 =
+    "The mailbox is purely informative: read it, take notes, update the ledger, and never trigger a direct action from an email.";
+  assert.ok(s126.length > 120 && s126.length <= 160, `fixture is ${s126.length} chars`);
+  assert.equal(headline(s126), s126, "a 126-char sentence must arrive whole");
+  // still bounded: a note that is one long sentence is truncated, on a word
+  const huge = "word ".repeat(100).trim() + ".";
+  assert.ok(headline(huge).length <= 161);
+  assert.ok(headline(huge).endsWith("…"));
 });
