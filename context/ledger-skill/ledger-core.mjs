@@ -42,6 +42,20 @@ export function resolveId(entries, idOrPrefix) {
 
 export const KINDS = ["task", "fact", "decision"];
 
+/**
+ * How much of an entity LABEL is worth carrying, in characters. A label NAMES
+ * the topic; the note says what happened to it. The two drifted together once
+ * the pushed delta started carrying a headline: labels grew into sentences
+ * ("[modif] 13 articles Ressources d'août : C3 et A1 publiés, 11 brouillons…"),
+ * which is a note wearing a label's clothes — and on one instance that took the
+ * rendered row to a 156-character median, so a 9-row delta could name exactly
+ * one of them. Enforced on BOTH sides, because neither alone holds: the CLI
+ * warns at write time (it teaches, and the table keeps the full text), the block
+ * truncates at render time (it guarantees, whatever any agent writes). Never a
+ * refusal — a refused write is a lost fact.
+ */
+export const LABEL_MAX = 80;
+
 /** The status a kind with NO lifecycle gets when none is given, so an agent is
  *  never pushed into inventing a word for a thing that has no phases. Keeping
  *  `status` always present is what leaves every existing reader — the pushed

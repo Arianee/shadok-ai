@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { rowKind } from "../context/ledger-skill/ledger-core.mjs";
+import { rowKind, LABEL_MAX } from "../context/ledger-skill/ledger-core.mjs";
 
 /**
  * Server side of the shared ledger. Two jobs the `shadok-ledger` skill's own
@@ -147,29 +147,69 @@ const LEDGER_HEAD = "⟦ledger · ";
  *   lines  1–3 → 0 of 324 wrapped        chars  430 on one line → not wrapped
  *   lines  4+  → ~30% of 162 wrapped     chars  910 on one line → wrapped
  *
- * A prompt is `⟦web⟧ header` + the message, so a one-line human message leaves
- * the block exactly one line of room. The old multi-line block spent 2+ and put
- * EVERY non-empty delta over the cliff: 85 real prompts, 24% of those carrying a
- * block, had the human's message neutralised this way. Hence: one line, and a
- * character budget inside it.
+ * The old multi-line block spent 2+ lines and put EVERY non-empty delta over
+ * the cliff: 85 real prompts, 24% of those carrying a block, had the human's
+ * message neutralised this way.
+ *
+ * Since #261 the block travels as its OWN paste, so it is judged ALONE — and
+ * the rule it is judged by is the binary's own, read out of it rather than
+ * bisected: `body.length <= 800 && newlines <= 2` (`var xK=800`). Two things
+ * follow, and they move the budget.
+ *
+ *   - The cliff for the block is 800, not the 430 measured when it still had
+ *     to share a prompt with the user's message. That measurement was of the
+ *     WHOLE prompt and does not bound this paste.
+ *   - Two newlines means the prelude may carry a SECOND line. The delta keeps
+ *     one and leaves the other free; nothing here should spend it by accident.
+ *
+ * So the block stays one line out of thrift and headroom, no longer out of
+ * correctness — and its budget is now set by what the reader needs (see
+ * `ROWS_TARGET`) rather than by how little it dares to spend.
  * ------------------------------------------------------------------ */
 
 /** Marks what follows the row, inline: "and here is what happened". */
 const CONT_MARK = "↳";
 /** Historical multi-line blocks, still replayed out of old transcripts. */
 const CONT_LINE = /^\s*↳ /;
-/** How much of a note reaches the block. */
-const HEADLINE_MAX = 120;
+/**
+ * How much of a note reaches the block. 120 cut the first sentence of a real
+ * `decision` row at 126 characters — "aucune action directe déclenchée par…",
+ * whose missing complement ("par un mail") carried the whole decision, so what
+ * was left could be read as its opposite. 19% of this table's notes were cut at
+ * 120, 13% at 160. It stops at 160 rather than going further because a headline
+ * is only ever served WHOLE (see `formatLedgerBlock`): a larger cap does not buy
+ * better headlines, it buys fewer of them — the long ones stop fitting the room
+ * left after the labels and are dropped entirely.
+ */
+const HEADLINE_MAX = 160;
 /** Below this, a sentence boundary is not believed — see `headline`. */
 const HEADLINE_MIN = 24;
 /**
- * The whole block's character ceiling. Chosen from the measurement above with
- * room left for the ⟦web⟧ header and an ordinary message: a long enough single
- * line collapses into a paste just as a fourth line does, so the budget is what
- * keeps the one-line rule from being defeated by content. Rows that do not fit
- * collapse into the overflow pointer, which is what it has always been for.
+ * How many rows the block tries to NAME. This, not a character count, is what
+ * the reader needs ("there are nine, here is who they are"), and it is the one
+ * quantity that does not change from one instance's table to another's: the
+ * character cost of three rows does, which is why the budget is expressed in
+ * rows and only BOUNDED in characters. A table whose labels are short pays less
+ * for the same information; one whose labels are long pays more, up to the
+ * ceiling — the cost adapts, the payload stays constant.
  */
-const BLOCK_MAX = 320;
+const ROWS_TARGET = 3;
+/**
+ * The block's character bound. Claude Code keeps a paste inline only below 800
+ * characters AND 2 newlines (`xK` in the binary; the prelude is the block plus
+ * one newline), and since the block travels as its OWN paste it is judged alone
+ * — so the old 320, calibrated when it had to share a prompt with the user's
+ * message, is no longer where the cliff is. 560 leaves the second line of the
+ * paste free and a wide margin under 800.
+ */
+const BLOCK_MAX = 560;
+/**
+ * Hard stop for the rendered line, defensive only: one pathological row must not
+ * be able to push the block past the paste rule, which would collapse it into
+ * `<pasted_content>` — survivable since #261 (the block is wrapped alone and the
+ * message stays an instruction) but it would still cost the delta its voice.
+ */
+const LINE_CEILING = 700;
 
 /**
  * The one line of the note that says WHAT happened, DERIVED rather than asked
@@ -205,37 +245,86 @@ export function headline(note: string | undefined, max: number = HEADLINE_MAX): 
   return (sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd() + "…";
 }
 
+/** `• [id] entity — status (source)` — the part of a row the reader cannot
+ *  reconstruct from anywhere else. The label is capped at render time, never in
+ *  the table: `check` and `list` still print it whole, and the `[id]` stays the
+ *  handle to quote (see `LABEL_MAX`). */
+function bareRow(r: LedgerRow): string {
+  const handle = r.id ? `[${r.id}] ` : "";
+  const src = r.source ? ` (${r.source})` : "";
+  // A `fact` has no lifecycle and a `decision` is not a phase of one, so the
+  // reader must not take their status for a position in open → resolved.
+  // `task` is the default and nearly the whole table: tagging it would be noise.
+  const kind = rowKind(r);
+  const tag = kind === "task" ? "" : ` · ${kind}`;
+  const label =
+    r.entity.length > LABEL_MAX ? r.entity.slice(0, LABEL_MAX - 1).trimEnd() + "…" : r.entity;
+  return ` • ${handle}${label} — ${r.status}${tag}${src}`;
+}
+
+/**
+ * What stands for the rows the budget could not name. It carries their IDS: an
+ * id is the handle `record --id` takes and `check` resolves, so a reader that
+ * recognises one can act on it, while `+8 more` leaves it with all of them or
+ * none. The count and the list are kept HONEST apart, because the delta is
+ * capped (`LEDGER_PUSH_CAP`) and `total` can exceed the rows we were handed —
+ * announcing `+8 : <7 ids>` would quietly lose one.
+ */
+function overflowMark(rows: LedgerRow[], shown: number, total: number): string {
+  const missing = total - shown;
+  if (missing <= 0) return "";
+  const ids = rows.slice(shown).map((r) => r.id).filter(Boolean);
+  const tail = " — run: ledger list)";
+  if (!ids.length) return ` • (+${missing} more${tail}`;
+  if (ids.length === missing) return ` • (+${missing} : ${ids.join(" ")}${tail}`;
+  return ` • (+${missing} more, ${ids.length} newest: ${ids.join(" ")}${tail}`;
+}
+
 /**
  * The delta block the agent sees ahead of a prompt. English (it is written into
- * the transcript — repo side). ONE line, within `BLOCK_MAX` (see above): per row
- * `• [id] entity — status (source)`, the kind when it is not the default `task`,
- * and `↳ <headline>` for what actually happened. Rows that do not fit the budget
- * become the overflow pointer rather than a second line.
+ * the transcript — repo side). ONE line: per row `• [id] entity — status
+ * (source)`, the kind when it is not the default `task`, and `↳ <headline>` for
+ * what actually happened.
+ *
+ * Labels are served BEFORE any headline, and that order is the whole of it. The
+ * first version appended row i's headline before testing whether row i+1 fitted,
+ * so the first row's detail outbid the second row's existence — measured on this
+ * table, a delta of 2, 5, 7 or 9 rows named exactly ONE of them every time, at
+ * any size, while 52 characters of the budget went unspent. `ledger list` gives
+ * the reader the notes in one call; nothing gives them back a row they were
+ * never told existed.
  */
 export function formatLedgerBlock(rows: LedgerRow[], total: number): string {
-  let line = `${LEDGER_HEAD}${total} update${total === 1 ? "" : "s"}⟧`;
+  const head = `${LEDGER_HEAD}${total} update${total === 1 ? "" : "s"}⟧`;
+  const bare = rows.map(bareRow);
+  // 1. How many rows can be named — the overflow mark is part of the bill, so a
+  //    row is only taken when what stands for the rest still fits beside it.
   let shown = 0;
-  for (const r of rows) {
-    const handle = r.id ? `[${r.id}] ` : "";
-    const src = r.source ? ` (${r.source})` : "";
-    // A `fact` has no lifecycle and a `decision` is not a phase of one, so the
-    // reader must not take their status for a position in open → resolved.
-    // `task` is the default and nearly the whole table: tagging it would be noise.
-    const kind = rowKind(r);
-    const tag = kind === "task" ? "" : ` · ${kind}`;
-    const bare = ` • ${handle}${r.entity} — ${r.status}${tag}${src}`;
-    // Always carry at least one row: an empty block would say a delta arrived
-    // and name nothing, which is worse than a long line.
-    if (shown > 0 && line.length + bare.length > BLOCK_MAX) break;
-    line += bare;
+  let len = head.length;
+  for (let i = 0; i < bare.length && shown < ROWS_TARGET; i++) {
+    const mark = overflowMark(rows, i + 1, total).length;
+    // Always carry at least one row: a block that announces a delta and names
+    // nothing is worse than a long line.
+    if (shown > 0 && len + bare[i].length + mark > BLOCK_MAX) break;
+    len += bare[i].length;
     shown++;
-    const h = headline(r.note);
-    if (h && line.length + h.length + 3 <= BLOCK_MAX) line += ` ${CONT_MARK} ${h}`;
   }
-  if (shown < total) line += ` • (+${total - shown} more — run: ledger list)`;
-  // Defensive: one oversized entity must not be able to defeat the one-line rule
-  // by length, which costs exactly as much as a second line would.
-  return line.length > BLOCK_MAX * 2 ? line.slice(0, BLOCK_MAX * 2 - 1) + "…" : line;
+  const mark = overflowMark(rows, shown, total);
+  // 2. Headlines go in the room that is left, first row first — and only WHOLE:
+  //    a sentence cut by whatever happened to remain is the defect HEADLINE_MAX
+  //    already exists to bound, and it can invert the meaning it loses.
+  let line = head;
+  let used = len + mark.length;
+  for (let i = 0; i < shown; i++) {
+    line += bare[i];
+    const h = headline(rows[i].note);
+    if (h && used + h.length + 3 <= BLOCK_MAX) {
+      line += ` ${CONT_MARK} ${h}`;
+      used += h.length + 3;
+    }
+  }
+  line += mark;
+  return line.length > LINE_CEILING ? line.slice(0, LINE_CEILING - 1) + "…" : line;
 }
 
 /** Prepend the block as its own leading line. Idempotent.

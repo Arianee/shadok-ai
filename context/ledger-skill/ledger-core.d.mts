@@ -15,6 +15,7 @@ export interface LedgerCoreRow {
 }
 export type LedgerKind = "task" | "fact" | "decision";
 export const KINDS: LedgerKind[];
+export const LABEL_MAX: number;
 export function normEntity(s: unknown): string;
 export function normKind(k: unknown): LedgerKind | null;
 export function rowKind(entry: unknown): LedgerKind;
