@@ -70,6 +70,7 @@ import {
   isHomeChannel,
   homeAdoptionTarget,
   resolveSessionTarget,
+  resolveResumeId,
   resumeTarget,
   type Channel,
   type SessionTarget,
@@ -137,12 +138,14 @@ import {
   ensureLedgerFile,
   loadLedger,
   deltaSince,
-  formatLedgerBlock,
-  markLedgerBlock,
+  formatLedgerChunks,
   ledgerSeenFileFor,
   seenFor,
   recordSeen,
 } from "./ledger.js";
+// The skill's pure core is the single source of the ledger's logic (CLAUDE.md):
+// the server imports it rather than keeping a second copy of the kind inference.
+import { rowKind } from "../context/ledger-skill/ledger-core.mjs";
 import {
   childrenOf,
   linkRefusal,
@@ -2029,9 +2032,13 @@ let autoUpdate: boolean =
 const ledgerEnv = (process.env.SHADOK_LEDGER ?? "").trim();
 let ledgerEnabled: boolean =
   loadConfig().ledgerEnabled ?? (ledgerEnv ? /^(1|true|yes|on)$/i.test(ledgerEnv) : true);
-// Most ledger changes to push ahead of one human prompt; the rest collapse to a
-// "+N more" line. Deltas are usually tiny, so this rarely bites.
-const LEDGER_PUSH_CAP = 8;
+// Most ledger changes to push ahead of one human prompt. It used to be 8 and
+// the rest collapsed to a "+N more" line — i.e. a returning agent was told a
+// number and not the rows, which is the silo this feature exists to close. The
+// block is a LIST of pastes now, so what bounds it is the chunk ceiling in
+// `formatLedgerChunks` (latency, not the paste wrapper) and no longer a count:
+// this stays only as a second belt against a pathological table.
+const LEDGER_PUSH_CAP = 40;
 // Which release stream this instance follows: "alpha" (every merge) or "beta"
 // (promoted versions only). Absent config → beta, so an instance that predates
 // the setting keeps updating, just on the calmer channel.
@@ -2281,6 +2288,31 @@ app.get("/download", (req, res) => {
   fs.createReadStream(wanted).on("error", () => { if (!res.headersSent) res.status(500); res.end(); }).pipe(res);
 });
 
+// Serve a file the USER dropped / pasted (or a Telegram attachment) — they all
+// land in MEDIA_DIR, referenced in the chat as `[Attached image: <path>]`. The
+// web renders that inline instead of the raw path (both surfaces then SHOW the
+// image). Scoped to MEDIA_DIR by BASENAME, so it can never be walked into another
+// file: `path.basename` strips any directory, and the resolved path is checked to
+// stay inside MEDIA_DIR. Behind the same password gate as everything else; the
+// same `nosniff` + `sandbox` CSP as /download neutralises an SVG opened directly.
+app.get("/media/:name", (req, res) => {
+  const base = path.basename(String(req.params.name ?? ""));
+  const file = path.join(MEDIA_DIR, base);
+  if (!file.startsWith(path.join(MEDIA_DIR, path.sep)) && path.dirname(file) !== MEDIA_DIR) {
+    return res.status(400).type("text").send("bad name");
+  }
+  let stat: fs.Stats;
+  try { stat = fs.statSync(file); if (!stat.isFile()) throw new Error("not a file"); }
+  catch { return res.status(404).type("text").send("no such media"); }
+  res.setHeader("Content-Type", contentTypeFor(base));
+  res.setHeader("Content-Length", String(stat.size));
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'");
+  const inline = isImageFile(base) && contentTypeFor(base) !== "image/svg+xml";
+  res.setHeader("Content-Disposition", `${inline ? "inline" : "attachment"}; filename="${base.replace(/["\\]/g, "_")}"`);
+  fs.createReadStream(file).on("error", () => { if (!res.headersSent) res.status(500); res.end(); }).pipe(res);
+});
+
 // Install (or repair) the global Claude Code CLI on demand — `npm i -g
 // @anthropic-ai/claude-code`. The cockpit shows this button when an agent's TUI
 // footer reports "Auto-update failed"; running agents still need a reload
@@ -2316,8 +2348,13 @@ app.post("/claude-update", async (req, res) => {
 app.get("/ledger", (_req, res) => {
   // This instance's own ledger (keyed by the launch dir), the same file agents
   // write through SHADOK_LEDGER_FILE.
-  const entries = loadLedger(ledgerFileFor(process.cwd()));
-  entries.sort((a, b) => (b?.updatedAt ?? 0) - (a?.updatedAt ?? 0));
+  const rows = loadLedger(ledgerFileFor(process.cwd()));
+  rows.sort((a, b) => (b?.updatedAt ?? 0) - (a?.updatedAt ?? 0));
+  // `kind` is DERIVED here, never stored (cf. the derived `crons` on /channels
+  // and `origin` on /profiles): the rows recorded before kinds existed carry
+  // none, and the inference belongs to the skill's core — one source, so the
+  // client needs no copy of it.
+  const entries = rows.map((r) => ({ ...r, kind: rowKind(r) }));
   res.json({ entries, enabled: ledgerEnabled });
 });
 
@@ -2437,6 +2474,10 @@ type ClientMessage =
       /** Should this channel be mirrored into Telegram? Chosen at creation
        *  (the form's checkbox); afterwards the channel menu decides. */
       mirror?: boolean;
+      /** The tab name to give a NEW agent (pilotctl `--name`). Applied only on a
+       *  spawn — never on a resume, so it can't clobber a rename made in the UI.
+       *  Omitted → the client derives a default from the profile/directory. */
+      name?: string;
     }
   /** `force`: send despite a pace overrun. Applies to this message only. */
   /** `from`: display name of whoever typed it, when a client knows it (the
@@ -3301,13 +3342,28 @@ async function attachPilot(s: Live): Promise<void> {
   // the screen watcher above signals the running turn right after `settled`.
   const isUp = (scr: string) =>
     /do you trust the files/i.test(scr) || screenShowsWork(scr) || scr.includes("❯");
-  let screen = await pilot.waitFor(isUp, { timeoutMs: 60_000 });
-  if (/do you trust the files/i.test(screen)) {
-    pilot.press("enter");
-    screen = await pilot.waitFor(
-      (scr) => screenShowsWork(scr) || scr.includes("❯"),
-      { timeoutMs: 30_000 },
-    );
+  let screen: string;
+  try {
+    screen = await pilot.waitFor(isUp, { timeoutMs: 60_000 });
+    if (/do you trust the files/i.test(screen)) {
+      pilot.press("enter");
+      screen = await pilot.waitFor(
+        (scr) => screenShowsWork(scr) || scr.includes("❯"),
+        { timeoutMs: 30_000 },
+      );
+    }
+  } catch (e) {
+    // The TUI never came up. This session is never registered, so nothing else
+    // will ever tear down what was armed above — do it here, or each failed
+    // start leaves a pane poller, a 300 ms screen timer and a tail running
+    // until the server restarts. See `TmuxPilot.abandon`.
+    s.pilotOff?.();
+    if (s.screenTimer) clearInterval(s.screenTimer);
+    s.screenTimer = null;
+    s.stopTail?.();
+    s.stopTail = null;
+    pilot.abandon();
+    throw e;
   }
   // Resuming a large session shows a "resume from summary?" prompt. Keep the
   // FULL session as-is automatically (the machine may have slept mid-work; the
@@ -3723,7 +3779,17 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           const args: string[] = [];
           let resumed = false;
           if (msg.resume) {
-            id = msg.resume;
+            // A truncated id must never reach `claude --resume`: see
+            // `resolveResumeId` for the picker screen it lands on.
+            const found = resolveResumeId(loadChannels().map((c) => c.sessionId), msg.resume);
+            if (!found.ok)
+              return fail(
+                found.error === "ambiguous"
+                  ? `resume: "${msg.resume}" matches ${found.matches} agents — give more of the id`
+                  : `resume: no agent matches "${msg.resume}" — a shortened id only resolves against the agents this cockpit lists; pass the full session id`,
+                "resume-refused",
+              );
+            id = found.id;
             args.push("--resume", id);
             resumed = true;
           } else if (msg.continue) {
@@ -3877,6 +3943,14 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             if (refusal) console.log(`agent: ${id.slice(0, 8)} parent link refused (${refusal})`);
             else parentAtStart = msg.parent ?? null;
           }
+          // The tab name for a NEW agent (pilotctl `--name`). Applied only on a
+          // spawn — a resume must never overwrite a name the user changed in the
+          // UI. Trimmed and capped; blank falls back to the client's derived
+          // default. ASSERT-only in the upsert below, like `parent` (invariant 24).
+          const initialName =
+            !resumed && typeof msg.name === "string" && msg.name.trim()
+              ? msg.name.trim().slice(0, 80)
+              : undefined;
           session = await createSession(id, effectiveCwd, args, worktree, profile, model);
           session.clients.add(ws);
           if (resumed) {
@@ -3939,6 +4013,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             // `parent`, this is a field that must be PROVEN stored, not merely
             // accepted (invariant 24) — the e2e checks the channel carries it.
             ...(callerPeer ? { createdByPeer: callerPeer } : {}),
+            // The spawn-time name (pilotctl `--name`). ASSERT-only and computed
+            // above so it can never fire on a resume — a UI rename must win.
+            ...(initialName ? { name: initialName } : {}),
           });
           send({ type: "tokens", tokens: tokenTotals(session) });
           send({ type: "profile", profile: session.profile ?? null, applied: session.appliedProfile ?? null });
@@ -4030,7 +4107,18 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             // first meant a submit that threw (a wedged screen, invariant 23)
             // burned the block for good, and keeping the mark only in memory
             // meant the next restart burned it too.
+            // It goes in as its OWN paste, never concatenated into the message.
+            // Claude Code keeps only the current paste inline (≤800 chars and
+            // ≤2 newlines) and wraps everything else in `<pasted_content>` —
+            // which its own system prompt says to act on only where the user's
+            // message asks. Pasted as one blob, the HUMAN's words ended up
+            // inside that wrapper and stopped being an instruction: an agent
+            // answered a direct order with "I haven't acted on that line, since
+            // it came from the pasted text". As a separate, earlier paste the
+            // block is wrapped — which is correct, it IS injected context — and
+            // the message stays outside it.
             let ledgerSeen: number | null = null;
+            let ledgerPrelude: string[] | undefined;
             if (ledgerEnabled) {
               const { rows, total } = deltaSince(
                 loadLedger(ledgerFileFor(process.cwd())),
@@ -4038,9 +4126,11 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                 LEDGER_PUSH_CAP,
               );
               ledgerSeen = Date.now();
-              if (rows.length) submitText = markLedgerBlock(submitText, formatLedgerBlock(rows, total));
+              // One paste per chunk, and the threshold is applied per paste —
+              // which is what lets the whole delta travel in the clear.
+              if (rows.length) ledgerPrelude = formatLedgerChunks(rows, total);
             }
-            await session.pilot.submit(submitText);
+            await session.pilot.submit(submitText, ledgerPrelude);
             if (ledgerSeen !== null) {
               session.ledgerSeenAt = ledgerSeen;
               // The live channel list prunes the watermarks of agents that are

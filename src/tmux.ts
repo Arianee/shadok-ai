@@ -452,8 +452,22 @@ export class TmuxPilot {
     }
   }
 
+  /**
+   * The screen captured right now rather than the poller's mirror, for the one
+   * read that has no predicate to wait on: `typeIntoBox`'s baseline. A mirror
+   * that lags a change by one poll would hand it a box that is no longer there.
+   */
+  private freshScreen(): string {
+    this.capture();
+    return this._screen;
+  }
+
   /** Pastes text with bracketed-paste framing (reliable for the TUI input). */
   private paste(text: string): void {
+    // Like every write to the pane: an idle pane's poller has backed off to
+    // SCREEN_SLOW_MS, as long as the whole window typeIntoBox gives a paste
+    // to show up in.
+    this.wake();
     tmux(["load-buffer", "-b", "cp", "-"], text);
     tmux(["paste-buffer", "-t", this.name, "-b", "cp", "-p", "-d"]);
   }
@@ -482,14 +496,16 @@ export class TmuxPilot {
    * bracketed paste with retry until the text shows, then Enter with retry
    * until the turn is actually sent.
    */
-  async submit(text: string): Promise<void> {
+  async submit(text: string, prelude?: string | string[]): Promise<void> {
     const typed = await typeIntoBox(
       {
+        screen: () => this.freshScreen(),
         paste: (t) => this.paste(t),
         clearInput: () => this.write("\x15"), // Ctrl-U
         waitFor: (p, o) => this.waitFor(p, o),
       },
       text,
+      { prelude },
     );
     if (!typed) {
       throw this.submitError("the text never appeared in the input box");
@@ -582,6 +598,28 @@ export class TmuxPilot {
       }
     }
     this.kill(); // idempotent: killing an absent session is a no-op
+  }
+
+  /**
+   * Let go of a pane that never became usable, without leaving a watcher behind.
+   *
+   * `start()` arms the poller before anyone knows whether the TUI will come up.
+   * When it does not, the caller's readiness wait throws — and nothing used to
+   * stop the poller, so every failed attempt left one capturing a dead screen
+   * for the life of the server. Two panes wedged on Claude Code's "Resume
+   * session" picker gathered enough of them to take nine captures in ten: the
+   * event loop was saturated, every request took seconds, and prompts to every
+   * OTHER agent were garbled or lost for nine days (2026-10-12).
+   *
+   * A pane we CREATED is killed: nobody will ever use it. One we ADOPTED is left
+   * alone — it may be a live agent on a server too slow to see it in time, and
+   * killing that on a timeout would turn a slow moment into lost work.
+   */
+  abandon(): void {
+    if (!this.attached) return this.kill();
+    if (this.poller) clearTimeout(this.poller);
+    this.poller = null;
+    this.exited = true;
   }
 
   /** Kills the tmux session (ends the agent). */

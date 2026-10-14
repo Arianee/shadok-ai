@@ -1,9 +1,9 @@
 {
   "name": "shadok-ai",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "main": "dist/session.js",
   "scripts": {
-    "test": "node --import tsx --test test/*.ts context/*/test/*.test.mjs",
+    "test": "node --import tsx --test --test-timeout=120000 test/*.ts context/*/test/*.test.mjs",
     "build": "tsc",
     "dev": "tsx src/cli.ts",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",

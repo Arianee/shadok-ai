@@ -156,6 +156,15 @@ Enter to skip; you can add it later from the web UI).
   refused for anything but your browser, since shell mode sits outside the
   agent's guardrails. The command and its output stay in the chat, reload
   included — as does one you typed yourself in the terminal view.
+- **Files you hand an agent** — paste or drop a file into the composer (an
+  image, a PDF, a CSV…) and it becomes a **chip** above the text box: a
+  thumbnail for an image, a named tag for anything else, each with a ✕ to
+  remove it. On send, an image shows **inline in your own message bubble**;
+  under the hood the agent still receives it as an `[Attached …: path]` line,
+  the same format Telegram uses, so nothing about how the agent reads it
+  changes. A message can be attachments alone, with no words. The files are
+  served back to the browser by `GET /media/<name>` from the same directory
+  Telegram attachments land in.
 - **Files an agent hands you** — when an agent's result IS a file (a report, an
   export, a screenshot, an archive) it arrives as a download card in the chat,
   inline if it is an image, and as an upload in the Telegram topic. It goes
@@ -165,6 +174,12 @@ Enter to skip; you can add it later from the web UI).
   otherwise just print a local path you cannot open. **Artifacts are denied**
   cockpit-wide for the same reason — a page on claude.ai is not the file you
   asked for (`SHADOK_ALLOW_ARTIFACTS=1` lifts it).
+- **Compaction summaries, folded away** — when Claude Code runs out of context
+  it compacts the conversation and writes a long "This session is being
+  continued…" summary as the first message of what follows. Shown in full it
+  buried the chat, so the cockpit folds it into a collapsible **Context summary**
+  box: collapsed by default, one click to read it, capped and scrolling even when
+  open. It is still real history — just out of the way.
 - **Diff panel** — what an agent actually changed, against its base.
 - **What an agent left running, on its tab** — a turning ⏳ for background
   shells, a still 👁 for monitors, each with its count past one. Claude Code
@@ -345,11 +360,20 @@ location / {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
+    client_max_body_size 50m;   # match the server's paste limit
 }
 ```
 
 The client picks `wss://` on its own when the page is HTTPS, so there is nothing
 to configure on that side.
+
+**Upload size.** The server accepts a pasted/dropped file up to 50 MB, but
+nginx's default `client_max_body_size` is **1 MB** — a full-page screenshot
+sails past that, and nginx answers its OWN `413` HTML page **before** the request
+reaches the cockpit. Raise the limit to match (`client_max_body_size 50m;`),
+or a paste larger than 1 MB fails at the proxy. The cockpit now shows a plain
+"too large" instead of a JSON parser error, but the file still won't go through
+until the proxy allows it.
 
 **Idle timeout.** A resting agent's `/ws` carries no traffic, and proxies
 idle-close a quiet socket (nginx `proxy_read_timeout`, 60s by default;
@@ -379,7 +403,7 @@ On the calling instance **A**, the invited agent registers B and drives it with
 
 ```bash
 pilotctl peer add B https://B <token>
-pilotctl spawn --peer B --profile dev --cwd /workspace
+pilotctl spawn --peer B --profile dev --name "migration bot" --cwd /workspace
 pilotctl prompt <id> "run the migration" --peer B
 pilotctl diff <id> --peer B
 ```
@@ -672,7 +696,7 @@ client, or immediately on an explicit `stop` (which ends it for everyone).
 | `{type:"auto-retry"}` / `-cancelled` / `-gave-up` | transient API error being retried |
 | `{type:"version", …}` / `{type:"server-reload", version}` | update available / server updated, reload |
 | `{type:"term-data", data}` | **experimental** — raw pane output (base64) for a client-side terminal emulator |
-| `{type:"gone"}` / `{type:"error", message, code?}` / `{type:"exited", code}` / `{type:"stopped"}` | session lost, errors, termination. `error.code` is `"busy"` for a prompt refused mid-turn and `"logged-out"` for a spawn refused because the instance isn't signed in — so a machine client needn't match on the message text |
+| `{type:"gone"}` / `{type:"error", message, code?}` / `{type:"exited", code}` / `{type:"stopped"}` | session lost, errors, termination. `error.code` is `"busy"` for a prompt refused mid-turn and `"logged-out"` for a spawn refused because the instance isn't signed in, `"resume-refused"` for a `resume` whose shortened id matches no agent or several — so a machine client needn't match on the message text |
 
 HTTP endpoints (same auth): `/usage`, `/live`, `/sessions`, `/recover`,
 `/diff`, `/channels` (its GET adds a **derived** `crons` field — never stored),
@@ -688,7 +712,9 @@ endpoint — the accent is the instance's shared identity, the mode is personal)
 `{pending, reason}`: whether this instance's lead agent is being started
 right now), `/version`, `/autoupdate`,
 `/update-channel` (POST `{channel}` — `alpha` or `beta`), `/permission-mode`, `/tweak/prepare` (POST — clone/refresh shadok-ai's own source,
-returns the cwd to start the tweak agent in), and the sign-in group: `/auth` (GET
+returns the cwd to start the tweak agent in), `/media/<name>` (GET — serves a
+pasted/dropped or Telegram attachment back for inline display; sandboxed, basename
+only), and the sign-in group: `/auth` (GET
 — `{loggedIn, email?, subscriptionType?}`), `/auth/login` (POST — start a flow,
 returns `{url}`; DELETE — cancel it), `/auth/code` (POST `{code}`).
 

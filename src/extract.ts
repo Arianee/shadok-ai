@@ -95,6 +95,23 @@ export function isResumeSummaryDialog(d: TuiDialog): boolean {
 }
 
 /**
+ * A line that is décor rather than question text: it STARTS (once trimmed) with
+ * a frame, rule or marker character.
+ *
+ * The dashes are the whole family, not one character: Claude Code 2.1.286
+ * began framing a permission prompt's command block with a rule of `╌`
+ * (U+254C) where earlier releases used the solid characters, and since that
+ * rule sits directly above "Do you want to proceed?" it was read as content —
+ * the question reached the web card and Telegram behind a full row of dashes.
+ * Which dash the TUI draws with is a styling choice it can change again, so
+ * listing only the one we saw would be caught out by the next release.
+ *
+ * Anchored on purpose: a sentence that merely CONTAINS a dash is prose, and
+ * must stay in the question.
+ */
+const FRAME_LINE = /^[─═╌╍┄┅┈┉╭╮╰╯│□⏺←→]/u;
+
+/**
  * Detects an interactive TUI dialog (multiple-choice question, permission
  * prompt…): numbered options, one of which carries the "❯" selector.
  */
@@ -174,7 +191,7 @@ export function detectDialog(screen: string): TuiDialog | null {
   const questionLines: string[] = [];
   for (let i = firstOptionLine - 1; i >= 0; i--) {
     const t = lines[i].trim();
-    if (t === "" || /^[─═╭╮╰╯│□⏺←→]/.test(t) || /[☐☒]|✔\s*Submit/.test(t)) {
+    if (t === "" || FRAME_LINE.test(t) || /[☐☒]|✔\s*Submit/.test(t)) {
       if (questionLines.length) break;
       continue;
     }
@@ -250,6 +267,14 @@ export interface HistoryTurn {
    */
   from?: string;
   origin?: string;
+  /**
+   * A compaction summary: the long "This session is being continued…" block
+   * Claude Code writes as a USER message when it compacts the conversation
+   * (`isCompactSummary` on the .jsonl line). It is real transcript content, so
+   * it must survive a reload — but it is huge and drowns the chat, so the client
+   * folds it into a collapsible box instead of a full-width bubble.
+   */
+  compaction?: true;
 }
 
 /**
@@ -311,6 +336,14 @@ export function loadHistory(cwd: string, sessionId: string): HistoryTurn[] {
       }
       const text = userPromptText(e);
       if (text === null) continue; // tool result, system reminder, interruption
+      // A compaction summary is a (large) USER message Claude Code writes itself
+      // on /compact or an auto-compaction. Keep it — it is real history — but
+      // flag it so the client can fold it away instead of flooding the chat.
+      if (e.isCompactSummary) {
+        turns.push({ role: "user", text, compaction: true, ...when });
+        pendingHiddenPrompt = false;
+        continue;
+      }
       // A pushed ledger delta may ride ahead of ANY prompt — human, cron, or an
       // agent notification — so strip it BEFORE classifying: otherwise a cron /
       // agent prompt no longer starts with its hiding mark and would leak into

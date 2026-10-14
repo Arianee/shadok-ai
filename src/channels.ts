@@ -70,8 +70,14 @@ export function isMirrored(c: Channel): boolean {
   return c.mirror ?? !!c.telegram;
 }
 
-/** Fields the server owns; a browser PUT must never overwrite or drop them. */
-const SERVER_OWNED = ["cwd", "branch", "repo", "telegram", "profile", "model", "parent", "home"] as const;
+/** Fields the server owns; a browser PUT must never overwrite or drop them.
+ * `createdByPeer` is the peer-ownership key (invariant 24): the browser never
+ * carries it, so leaving it out here let every `PUT /channels` STRIP it, and the
+ * next resume by the peer failed `ownedByPeer` on its own agent — "a peer may
+ * only resume its own agents" — which broke any multi-step remote exchange
+ * (the holder's first resume ran; the browser's next sync wiped the owner). Same
+ * loss as `profile`/`parent` before they were listed here. */
+const SERVER_OWNED = ["cwd", "branch", "repo", "telegram", "profile", "model", "parent", "home", "createdByPeer"] as const;
 
 /**
  * Pure: is this channel the environment's home base — pinned and never closable?
@@ -496,4 +502,35 @@ export function resumeTarget(
     branch: t.branch ?? sent.branch?.trim() ?? null,
     repo: t.repo ?? sent.repo?.trim() ?? null,
   };
+}
+
+const FULL_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export type ResumeLookup =
+  | { ok: true; id: string }
+  | { ok: false; error: "empty" | "not-found" | "ambiguous"; matches: number };
+
+/**
+ * The full session id a `resume` names — or an explicit refusal.
+ *
+ * Ids are displayed 8 characters long everywhere (pilotctl, the tab menu,
+ * Telegram), so that is what comes back from whoever read one. Passed through
+ * verbatim, `claude --resume 113f3745` does not resume anything: it opens Claude
+ * Code's "Resume session" PICKER, a screen with no prompt, in a pane named after
+ * the truncated id — an agent that never becomes ready and that no channel
+ * points at. Same family as `resolveCronId` (invariant 17): a short handle is
+ * resolved to exactly one id, and an empty or ambiguous one is refused rather
+ * than settled at random.
+ *
+ * A complete id is returned as it is even when the registry does not know it:
+ * `/recover` resumes sessions whose channel is long gone.
+ */
+export function resolveResumeId(known: string[], given: string): ResumeLookup {
+  const n = (given ?? "").trim();
+  if (!n) return { ok: false, error: "empty", matches: 0 };
+  if (known.includes(n) || FULL_SESSION_ID.test(n)) return { ok: true, id: n };
+  const hits = [...new Set(known.filter((id) => id.startsWith(n)))];
+  if (hits.length === 0) return { ok: false, error: "not-found", matches: 0 };
+  if (hits.length > 1) return { ok: false, error: "ambiguous", matches: hits.length };
+  return { ok: true, id: hits[0] };
 }

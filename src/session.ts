@@ -181,14 +181,16 @@ export class PtyPilot {
    * verify the message actually went through (spinner visible or "❯ …"
    * echo in the transcript), with retries.
    */
-  async submit(text: string): Promise<void> {
+  async submit(text: string, prelude?: string | string[]): Promise<void> {
     const typed = await typeIntoBox(
       {
+        screen: () => this.screen(),
         paste: (t) => this.write(`\x1b[200~${t}\x1b[201~`),
         clearInput: () => this.write("\x15"), // Ctrl-U
         waitFor: (p, o) => this.waitFor(p, o),
       },
       text,
+      { prelude },
     );
     if (!typed) {
       throw this.submitError("the text never appeared in the input box");
@@ -308,6 +310,12 @@ export class PtyPilot {
 
   kill(): void {
     this.proc?.kill();
+  }
+
+  /** Twin of `TmuxPilot.abandon`. A PTY dies with us and can never be adopted
+   *  again, so there is nothing to spare. */
+  abandon(): void {
+    this.kill();
   }
 }
 
