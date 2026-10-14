@@ -6,6 +6,7 @@ import {
   ledgerFileFor,
   deltaSince,
   formatLedgerBlock,
+  formatLedgerChunks,
   headline,
   markLedgerBlock,
   hasLedgerBlock,
@@ -154,8 +155,10 @@ test("formatLedgerBlock: a headline per row, and the kind only when it is not a 
   assert.ok(block.includes("• [c3d4] supersede, not append — decided · decision ↳"));
   // a task carries no tag — it is nearly the whole table, so it would be noise
   assert.ok(!block.includes("· task"));
-  // the fourth row is past ROWS_TARGET, so it is the overflow — by its id
-  assert.ok(block.endsWith("• (+1 : e5f6 — run: ledger list)"), block);
+  // the fourth row is named too — a row is never dropped for size — it simply
+  // carries no headline, being past HEADLINE_ROWS (and having no note anyway)
+  assert.ok(block.includes("• [e5f6] no note here — open"), block);
+  assert.ok(!block.includes("more — run: ledger list"), "nothing overflowed");
   // a row with no note gets no continuation line
   assert.equal((block.match(/↳/g) || []).length, 3);
 });
@@ -189,16 +192,17 @@ test("stripLedgerBlock removes the block whole — one-line and historical multi
   assert.equal(stripPromptMeta(stripLedgerBlock(full)), user);
 });
 
-test("the block is ONE LINE and within budget — a fourth line neutralises the user's message", () => {
+test("every chunk is its own paste, and each one stays under the inline rule", () => {
   // Not a style rule. `pilot.submit` pastes into the TUI, and Claude Code
   // collapses a paste past a threshold into `<pasted_content>` — material its
   // own system prompt says to act on only where the user's message asks. With a
-  // multi-line block the user's message is INSIDE that wrapper and stops being
-  // an instruction; an agent answered "I haven't acted on that line" to a direct
-  // order. Measured on 486 real prompts: 0 of 324 at ≤3 lines, ~30% of 162 at ≥4.
-  // Since #261 the block is its own paste and is judged alone by the binary's
-  // own rule (`body.length <= 800 && newlines <= 2`), so one line is thrift and
-  // headroom now — and the second line of that paste stays free on purpose.
+  // multi-line block the user's message was INSIDE that wrapper and stopped
+  // being an instruction; an agent answered "I haven't acted on that line" to a
+  // direct order. Since #261 the block is its own paste, and since the rule is
+  // applied PER PASTE the block is a LIST of them: each chunk is judged alone,
+  // so what no single paste can carry in the clear, several can. Measured on a
+  // live agent: eight chunks and a message, 1272 characters over nine lines,
+  // nothing wrapped, order obeyed.
   const rows = Array.from({ length: 8 }, (_, i) => ({
     id: `id0${i}`,
     entity: `a reasonably long entity name number ${i} as they really are`,
@@ -208,21 +212,61 @@ test("the block is ONE LINE and within budget — a fourth line neutralises the 
     updatedAt: i,
   }));
   for (const n of [1, 2, 3, 5, 8]) {
-    const block = formatLedgerBlock(rows.slice(0, n), 20);
-    assert.equal(block.split("\n").length, 1, `${n} rows must stay on ONE line`);
-    assert.ok(block.length <= 700, `${n} rows: ${block.length} chars is past the ceiling`);
+    const chunks = formatLedgerChunks(rows.slice(0, n), n);
+    for (const c of chunks) {
+      // the binary's own rule, with margin: 800 characters AND 2 newlines
+      assert.ok(c.length <= 800, `a chunk of ${c.length} chars would be wrapped`);
+      assert.ok((c.match(/\n/g) ?? []).length <= 2, `a chunk with 3 newlines would be wrapped`);
+    }
+    // every row is named: losing a row is the silo this closes, losing its
+    // sentence is one `ledger list` away
+    const block = chunks.join("");
+    for (const r of rows.slice(0, n)) assert.ok(block.includes(`[${r.id}]`), `${r.id} lost at n=${n}`);
     assert.ok(hasLedgerBlock(block)); // and still detected, so it is still stripped
-    assert.equal(stripLedgerBlock(`${block}\n⟦web · x⟧\nhi`), "⟦web · x⟧\nhi");
+    assert.equal(stripLedgerBlock(`${block}⟦web · x⟧\nhi`), "⟦web · x⟧\nhi");
   }
-  // rows that do not fit become the overflow pointer, never a second line
-  assert.match(formatLedgerBlock(rows, 20), /\(\+\d+ more.* — run: ledger list\)$/);
+  // only the newest few carry what happened — detail is what degrades
+  assert.equal((formatLedgerChunks(rows, 8).join("").match(/↳/g) ?? []).length, 3);
+  // a row is never split across two pastes: half a row in the clear and half in
+  // another reads as two rows
+  for (const c of formatLedgerChunks(rows, 8)) {
+    assert.ok(c.endsWith("\n"), "a chunk ends at a row boundary");
+    assert.ok(!/ • \[[0-9a-z]*$/.test(c.trimEnd()), "a chunk never ends mid-handle");
+  }
   // a single oversized row is still carried — an empty block would announce a
-  // delta and name nothing, which is worse than a long line
+  // delta and name nothing, which is worse than a long one
   const huge = [{ id: "a1b2", entity: "x".repeat(900), status: "open", updatedAt: 1 }];
   const one = formatLedgerBlock(huge, 1);
-  assert.equal(one.split("\n").length, 1);
   assert.ok(one.includes("[a1b2]"));
-  assert.ok(one.length <= 700);
+  assert.ok(one.length < 300, `a 900-char label still cost ${one.length}`);
+});
+
+test("a delta too big for the chunk ceiling loses detail, then ids — never a row in silence", () => {
+  // The ceiling is latency, not the wrapper: each chunk is a wait on the most
+  // fragile path here. So it IS reachable, and what it does when reached is the
+  // contract — degrade in a stated order, and say so in the overflow.
+  const many = Array.from({ length: 200 }, (_, i) => ({
+    id: `q${String(i).padStart(3, "0")}`,
+    entity: `an entity with a label of entirely ordinary length, number ${i}`,
+    status: "open",
+    source: "PR#1203",
+    note: `Row ${i} moved and this sentence says what happened to it.`,
+    updatedAt: i,
+  }));
+  const chunks = formatLedgerChunks(many, 200);
+  assert.ok(chunks.length <= 8, `${chunks.length} chunks is past the ceiling`);
+  for (const c of chunks) assert.ok(c.length <= 800 && (c.match(/\n/g) ?? []).length <= 2);
+  const block = chunks.join("");
+  // what could not be named in full is still ANNOUNCED, and by id: a row
+  // reduced to its handle can still be looked up, a row that vanished cannot
+  const named = (block.match(/ • \[q/g) ?? []).length;
+  assert.ok(named > 1 && named < 200, `named ${named} of 200`);
+  const claimed = Number(block.match(/\(\+(\d+) /)![1]);
+  assert.equal(named + claimed, 200, "the count and the rows must add up");
+  for (const r of many.slice(named)) assert.ok(block.includes(r.id), `${r.id} vanished`);
+  // the rows the delta puts FIRST are the ones kept — `deltaSince` hands them
+  // newest-first, and a sibling is about to act on those
+  assert.ok(block.includes("• [q000]") && block.includes("• [q001]"));
 });
 
 test("stripLedgerBlock eats the gap the paste wrapper leaves, or the ⟦platform⟧ header shows", () => {
@@ -257,35 +301,32 @@ function delta(n: number) {
   }));
 }
 
-test("the block names several rows — a headline must not outbid the next row's existence", () => {
+test("every changed row is named — losing a row is the silo, losing its sentence is not", () => {
   // The first version appended row i's headline before testing whether row i+1
-  // fitted, so a delta of 2, 5, 7 or 9 rows named exactly ONE of them, every
-  // time, while 52 characters of the budget went unspent. `ledger list` gives
-  // the reader the notes back in one call; nothing gives back a row they were
+  // fitted, so a delta of 2, 3, 5 or 9 rows named exactly ONE of them, every
+  // time. Then the budget was one paste, so three was all that fit. The block
+  // is a LIST of pastes now, so the whole delta travels: `ledger list` gives
+  // the reader the notes back in one call, nothing gives back a row they were
   // never told existed.
-  for (const n of [2, 3, 5, 8]) {
-    const block = formatLedgerBlock(delta(n), n);
-    const named = (block.match(/ • \[/g) ?? []).length;
-    assert.ok(named >= Math.min(n, 3), `${n} rows: only ${named} named — ${block.length} chars`);
-    assert.equal(block.split("\n").length, 1);
+  for (const n of [2, 3, 5, 8, 20]) {
+    const rows = delta(n);
+    const block = formatLedgerBlock(rows, n);
+    for (const r of rows) assert.ok(block.includes(`[${r.id}]`), `${r.id} missing at n=${n}`);
+    assert.ok(!block.includes("run: ledger list"), `n=${n} should not overflow: ${block.length} chars`);
   }
-  // and the detail is still there for the rows that fitted
+  // and the detail is on the newest few only
+  assert.equal((formatLedgerBlock(delta(8), 8).match(/↳/g) ?? []).length, 3);
   assert.ok(formatLedgerBlock(delta(3), 3).includes("↳ Row 0 moved"));
 });
 
-test("the overflow carries the ids, and never claims to carry more than it has", () => {
+test("the overflow names what it could not carry, and never claims more than it holds", () => {
   // An id is the handle `record --id` takes and `check` resolves, so a reader
-  // that recognises one can act on it; `+8 more` leaves it with all of them or
-  // none. But the delta is CAPPED, so `total` can exceed the rows we were
-  // handed — announcing `+8 : <7 ids>` would quietly lose one.
+  // that recognises one can act on it. But the delta is CAPPED, so `total` can
+  // exceed the rows we were handed — announcing `+8 : <7 ids>` would quietly
+  // lose one, which is the very thing this is for.
   const rows = delta(8);
-  const whole = formatLedgerBlock(rows, 8); // we hold every changed row
-  const unnamed = 8 - (whole.match(/ • \[/g) ?? []).length;
-  assert.match(whole, new RegExp(`\\(\\+${unnamed} : ([0-9a-z]+ ){${unnamed - 1}}[0-9a-z]+ — run`));
-  for (const r of rows.slice(8 - unnamed)) assert.ok(whole.includes(r.id), `${r.id} missing`);
-
   const capped = formatLedgerBlock(rows, 57); // 57 changed, 8 handed to us
-  assert.match(capped, /\(\+\d+ more, \d+ newest: /);
+  assert.match(capped, /\(\+\d+ more — run: ledger list\)/);
   const claimed = Number(capped.match(/\(\+(\d+) more/)![1]);
   assert.equal(claimed, 57 - (capped.match(/ • \[/g) ?? []).length);
 });

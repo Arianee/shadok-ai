@@ -136,7 +136,7 @@ import {
   ensureLedgerFile,
   loadLedger,
   deltaSince,
-  formatLedgerBlock,
+  formatLedgerChunks,
   ledgerSeenFileFor,
   seenFor,
   recordSeen,
@@ -2005,9 +2005,13 @@ let autoUpdate: boolean =
 const ledgerEnv = (process.env.SHADOK_LEDGER ?? "").trim();
 let ledgerEnabled: boolean =
   loadConfig().ledgerEnabled ?? (ledgerEnv ? /^(1|true|yes|on)$/i.test(ledgerEnv) : true);
-// Most ledger changes to push ahead of one human prompt; the rest collapse to a
-// "+N more" line. Deltas are usually tiny, so this rarely bites.
-const LEDGER_PUSH_CAP = 8;
+// Most ledger changes to push ahead of one human prompt. It used to be 8 and
+// the rest collapsed to a "+N more" line — i.e. a returning agent was told a
+// number and not the rows, which is the silo this feature exists to close. The
+// block is a LIST of pastes now, so what bounds it is the chunk ceiling in
+// `formatLedgerChunks` (latency, not the paste wrapper) and no longer a count:
+// this stays only as a second belt against a pathological table.
+const LEDGER_PUSH_CAP = 40;
 // Which release stream this instance follows: "alpha" (every merge) or "beta"
 // (promoted versions only). Absent config → beta, so an instance that predates
 // the setting keeps updating, just on the calmer channel.
@@ -4082,7 +4086,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
             // block is wrapped — which is correct, it IS injected context — and
             // the message stays outside it.
             let ledgerSeen: number | null = null;
-            let ledgerPrelude: string | undefined;
+            let ledgerPrelude: string[] | undefined;
             if (ledgerEnabled) {
               const { rows, total } = deltaSince(
                 loadLedger(ledgerFileFor(process.cwd())),
@@ -4090,7 +4094,9 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                 LEDGER_PUSH_CAP,
               );
               ledgerSeen = Date.now();
-              if (rows.length) ledgerPrelude = formatLedgerBlock(rows, total) + "\n";
+              // One paste per chunk, and the threshold is applied per paste —
+              // which is what lets the whole delta travel in the clear.
+              if (rows.length) ledgerPrelude = formatLedgerChunks(rows, total);
             }
             await session.pilot.submit(submitText, ledgerPrelude);
             if (ledgerSeen !== null) {
