@@ -151,3 +151,87 @@ needs the same treatment those got — real queries, before and after.
 added for P4's file: overwriting a note destroyed the previous day's account of
 how a spec was delivered, recoverable only from the repo's PR bodies. Still not
 worth unbounded rows inside a state table.
+
+---
+
+# Addendum, same day: the delta carries ALL of it, in several pastes
+
+Status: built (2026-10-14), after the above shipped.
+
+The reasoning above — and the two specs before it — all took the paste threshold
+for a ceiling on what the delta may carry. The admin asked the obvious question
+nobody had asked: *the threshold is per paste, so why not several pastes?*
+
+It is right, and it was measured before it was believed. Eight separate pastes
+plus the message, into a live `claude` pane:
+
+```
+WRAPPED: false | chars: 1272 | rows present: 8/8   → the agent answered MULTI8
+```
+
+**1272 characters over nine lines, entirely in the clear.** A payload no single
+paste can deliver by any formatting, because `800 / 2 newlines` is the size of
+one paste and we choose how many there are.
+
+So the ceiling was never the wrapper. What actually bounds the prelude is
+**latency**: each chunk has to be waited for before the next is pasted, or two
+reach the pane as one paste event and the split is undone. Measured against a
+real pane, through the production `typeIntoBox`:
+
+| delta | chunks | submit |
+|---|---|---|
+| none | 0 | 347 ms |
+| 1–3 rows | 1 | 664 ms |
+| 8 rows | 2 | 1.0 s |
+| 20 rows | 4 | 1.65 s |
+| 40 rows | 6 | 2.5 s |
+
+~330 ms per chunk, which is the screen poll. Deterministic over five repeats.
+
+## What that changes
+
+The admin's requirement was *"I want all of it, otherwise we lose ledger
+information that never got through"* — and that names the right asymmetry. A row
+the reader is never told about is the silo this feature exists to close; a row
+named without its sentence is one `ledger list` away. So the budget is spent in
+this order and degrades in the opposite one:
+
+1. **every** changed row gets `• [id] entity — status (source)`;
+2. the newest `HEADLINE_ROWS` (3) also get `↳ <what happened>`;
+3. only if even step 1 exceeds `PRELUDE_MAX_CHUNKS` (8) do the oldest rows
+   collapse into the overflow mark, which still carries their **ids**;
+4. and only when there are more than we hold does it fall back to a count.
+
+`LEDGER_PUSH_CAP` goes from 8 to 40 — it was the thing turning a returning
+agent's backlog into a number. At 40 rows everything is still named, in 6
+chunks (~4400 characters). `ROWS_TARGET`/`BLOCK_MAX`/`LINE_CEILING` are gone:
+nothing is sized against the wrapper any more.
+
+`formatLedgerChunks` is the new shape of the block; `formatLedgerBlock` is the
+same thing joined, which is what lands in the transcript and what
+`stripLedgerBlock` removes (its bullet test is made on the TRIMMED line now —
+a continuation chunk starts with the ` • ` separating two rows, and anchoring on
+column zero would have left every chunk but the first in the displayed message).
+
+## The one that could bite
+
+The chunk ceiling is counted on the **packed** result, never estimated from a
+character budget. Greedy packing leaves a chunk short whenever the next row does
+not fit, so `chunks × PASTE_MAX` and the sum of the rows do not agree — the
+first version computed room that way and produced **9 chunks against a ceiling
+of 8**, caught only because the test counted the chunks rather than the
+characters.
+
+## Verified
+
+`test/detect.test.ts` goes red if the chunks are pasted as one blob (checked by
+making that regression on purpose), and pins that a chunk which never lands does
+not take the message with it. On live agents, both transports, production
+answering throughout:
+
+| transport | delta | chars | lines | named | wrapped | agent |
+|---|---|---|---|---|---|---|
+| tmux | 20 rows | 2037 | 5 | 20/20 | none | obeyed |
+| node-pty | 20 rows | 1994 | 5 | 20/20 | none | obeyed |
+
+1107/1107 tests.

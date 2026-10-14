@@ -386,3 +386,35 @@ test("typeIntoBox: a prelude that never lands must not take the message with it"
   assert.equal(ok, true);
   assert.equal(p.st.box, "ALPHA"); // the message got through on its own
 });
+
+test("typeIntoBox: several prelude chunks are several PASTES, and the message is still last", async () => {
+  // The paste rule (800 chars, 2 newlines) is applied PER PASTE and decided as
+  // each one is made, so N small pastes carry what one large one cannot: eight
+  // chunks and a message put 1272 characters over nine lines into a live agent
+  // with nothing wrapped. The contract here is only that they really are N
+  // pastes, in order, with the message last — fired back to back without the
+  // wait they reach the pane as ONE paste event, which undoes the whole split.
+  const p = wrappingBox(80, [6, 6, 6, 0]);
+  const chunks = ["⟦ledger · 6 updates⟧ • [a1b2] one — resolved\n", " • [c3d4] two — open\n", " • [e5f6] three — open\n"];
+  const ok = await typeIntoBox(p as any, "the user's words", { appearMs: 300, settleMs: 5, clearMs: 10, prelude: chunks });
+  assert.equal(ok, true);
+  assert.deepEqual(p.st.pastes, [...chunks, "the user's words"]);
+  assert.equal(p.st.box, chunks.join("") + "the user's words");
+  assert.equal(p.st.clears, 0, "nothing had to be recovered");
+});
+
+test("typeIntoBox: a prelude CHUNK that never lands must not take the message with it", async () => {
+  // Same rule as the single prelude, now with more places to lose one: losing
+  // the injected context is survivable, losing the user's message is not.
+  const p = wrappingBox(80);
+  let n = 0;
+  const dropped = { ...p, paste(t: string) { if (++n === 2) return; p.paste(t); } };
+  const ok = await typeIntoBox(dropped as any, "ALPHA", {
+    appearMs: 30,
+    settleMs: 5,
+    clearMs: 10,
+    prelude: ["⟦ledger · 2 updates⟧ • [a1b2] one — resolved\n", " • [c3d4] two — open\n"],
+  });
+  assert.equal(ok, true);
+  assert.ok(p.st.box.endsWith("ALPHA"), `box was ${JSON.stringify(p.st.box)}`);
+});

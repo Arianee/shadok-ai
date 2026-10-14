@@ -181,7 +181,7 @@ export class PtyPilot {
    * verify the message actually went through (spinner visible or "❯ …"
    * echo in the transcript), with retries.
    */
-  async submit(text: string, prelude?: string): Promise<void> {
+  async submit(text: string, prelude?: string | string[]): Promise<void> {
     const typed = await typeIntoBox(
       {
         screen: () => this.screen(),

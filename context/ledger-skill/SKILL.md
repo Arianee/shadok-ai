@@ -71,10 +71,12 @@ consequence first, details after.
 **The label NAMES the topic; the note says what happened to it.** Keep the
 entity under ~80 characters — `partner-page hospital logo`, not `13 August
 Resources articles: C3 and A1 published, 11 drafts waiting on the daily go`.
-The second is a note wearing a label's clothes, and the block that carries your
-update to your siblings has room for about three rows: every character the label
-spends is a row they are not told about. Nothing refuses a long label — the row
-is saved either way — but only its first 80 characters reach that block.
+The second is a note wearing a label's clothes. The block that carries your
+update to your siblings names every row that changed, but it is pasted into
+their session in pieces and each piece costs them a fraction of a second of
+waiting, so a label that is three times too long makes everyone wait for words
+their note already carries. Nothing refuses a long label — the row is saved
+either way — but only its first 80 characters reach that block.
 
 ## Is it a task, a fact, or a decision?
 

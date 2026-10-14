@@ -277,11 +277,11 @@ export interface TypeOptions {
   /** How long to wait for the box to actually read empty after Ctrl-U. */
   clearMs?: number;
   /**
-   * Injected context to put in the box BEFORE the message, as its own paste —
-   * not concatenated into it. See `typeIntoBox` for why that distinction is a
-   * correctness one.
+   * Injected context to put in the box BEFORE the message, as its OWN paste(s)
+   * — not concatenated into it. See `typeIntoBox` for why that distinction is a
+   * correctness one, and why SEVERAL of them buy room a single one cannot.
    */
-  prelude?: string;
+  prelude?: string | string[];
 }
 
 /**
@@ -336,20 +336,29 @@ export async function typeIntoBox(
     // Only "" and the resting state count as an empty box; anything else the
     // box shows once we paste is our paste (whole, or collapsed).
     const before = inputText(pilot.screen());
-    if (prelude) {
-      // TWO pastes, and the second must be the message. Claude Code keeps only
-      // the CURRENT paste inline and leaves every earlier one collapsed, so
-      // pasting separately is what puts the injected context inside the
-      // `<pasted_content>` wrapper and leaves the user's words outside it.
-      // Waiting for the first to land is load-bearing: fired back to back they
-      // can reach the pane as one paste event, which is exactly the single
-      // blob this exists to stop being.
-      pilot.paste(prelude);
+    // N+1 pastes, and the LAST must be the message. Claude Code decides whether
+    // a paste stays inline when it is the CURRENT one and leaves every earlier
+    // one as it then became, so pasting separately is what puts the injected
+    // context inside the `<pasted_content>` wrapper and leaves the user's words
+    // outside it. The threshold (800 chars, 2 newlines) is applied PER PASTE,
+    // which is why the prelude may be a LIST: measured on a live agent, eight
+    // chunks and a message carried 1272 characters over nine lines with nothing
+    // wrapped at all — a ceiling a single paste cannot reach by any formatting.
+    // Waiting for each to land is load-bearing: fired back to back they reach
+    // the pane as ONE paste event, which is exactly the single blob this exists
+    // to stop being.
+    for (const chunk of prelude ? (Array.isArray(prelude) ? prelude : [prelude]) : []) {
+      if (!chunk) continue;
+      const seen = pilot.screen();
+      pilot.paste(chunk);
       try {
-        await pilot.waitFor((s) => inputText(s) !== before, { timeoutMs: appearMs });
+        // The SCREEN, not `inputText`: that helper reads the `❯` line alone, so
+        // once a chunk has filled it every later one lands on a continuation
+        // line and the box's visible text stops moving.
+        await pilot.waitFor((s) => s !== seen, { timeoutMs: appearMs });
       } catch {
-        // The prelude never showed. Fall through and paste the message anyway:
-        // losing the context is survivable, losing the message is not.
+        // A chunk never showed. Fall through and paste the rest anyway: losing
+        // the context is survivable, losing the message is not.
       }
     }
     // The SCREEN, not `inputText`: the box's visible text is read off its `❯`

@@ -159,12 +159,19 @@ const LEDGER_HEAD = "⟦ledger · ";
  *   - The cliff for the block is 800, not the 430 measured when it still had
  *     to share a prompt with the user's message. That measurement was of the
  *     WHOLE prompt and does not bound this paste.
- *   - Two newlines means the prelude may carry a SECOND line. The delta keeps
- *     one and leaves the other free; nothing here should spend it by accident.
+ *   - The rule is applied PER PASTE, and we choose how many pastes there are.
+ *     So 800 is not a ceiling on what the delta may carry at all: it is the
+ *     size of one CHUNK. Measured on a live agent, eight chunks plus the
+ *     message carried 1272 characters over nine lines with nothing wrapped and
+ *     the order obeyed — a payload no single paste can deliver in the clear by
+ *     any formatting.
  *
- * So the block stays one line out of thrift and headroom, no longer out of
- * correctness — and its budget is now set by what the reader needs (see
- * `ROWS_TARGET`) rather than by how little it dares to spend.
+ * So the block is a LIST of one-line chunks (`formatLedgerChunks`), and what
+ * bounds it is no longer the wrapper but LATENCY: every chunk must be waited
+ * for before the next is pasted, or two reach the pane as one paste event and
+ * the whole split is undone. That is the budget `PRELUDE_MAX_CHUNKS` spends —
+ * seconds between "send" and the message leaving, on the most fragile path
+ * here — and it is why no row is ever dropped for size while the DETAIL is.
  * ------------------------------------------------------------------ */
 
 /** Marks what follows the row, inline: "and here is what happened". */
@@ -185,31 +192,33 @@ const HEADLINE_MAX = 160;
 /** Below this, a sentence boundary is not believed — see `headline`. */
 const HEADLINE_MIN = 24;
 /**
- * How many rows the block tries to NAME. This, not a character count, is what
- * the reader needs ("there are nine, here is who they are"), and it is the one
- * quantity that does not change from one instance's table to another's: the
- * character cost of three rows does, which is why the budget is expressed in
- * rows and only BOUNDED in characters. A table whose labels are short pays less
- * for the same information; one whose labels are long pays more, up to the
- * ceiling — the cost adapts, the payload stays constant.
+ * How many rows the block carries a HEADLINE for. Every changed row is named
+ * whatever happens (see `formatLedgerChunks`); this only bounds how many of
+ * them also say what happened, because that detail is what the reader can get
+ * back from `ledger list` in one call.
  */
-const ROWS_TARGET = 3;
+const HEADLINE_ROWS = 3;
 /**
- * The block's character bound. Claude Code keeps a paste inline only below 800
- * characters AND 2 newlines (`xK` in the binary; the prelude is the block plus
- * one newline), and since the block travels as its OWN paste it is judged alone
- * — so the old 320, calibrated when it had to share a prompt with the user's
- * message, is no longer where the cliff is. 560 leaves the second line of the
- * paste free and a wide margin under 800.
+ * One paste's character bound. Claude Code keeps a paste inline only below 800
+ * characters AND 2 newlines (`xK` in the binary) — and applies that PER PASTE,
+ * deciding each one as it is made. So the prelude is a LIST of pastes: measured
+ * on a live agent, eight chunks plus the message carried 1272 characters over
+ * nine lines with nothing wrapped, which no single paste can do by any
+ * formatting. 760 leaves margin under 800; a chunk holds ONE line and its
+ * trailing newline, well inside the 2 the rule allows.
  */
-const BLOCK_MAX = 560;
+const PASTE_MAX = 760;
 /**
- * Hard stop for the rendered line, defensive only: one pathological row must not
- * be able to push the block past the paste rule, which would collapse it into
- * `<pasted_content>` — survivable since #261 (the block is wrapped alone and the
- * message stays an instruction) but it would still cost the delta its voice.
+ * The whole prelude's bound, across every chunk. Not a formatting limit — a
+ * LATENCY one: each chunk must be waited for before the next is pasted, or two
+ * reach the pane as one paste event and the split is undone. So every extra
+ * chunk is roughly half a second between "send" and the message leaving, on the
+ * most fragile path in this codebase (the one that delivered a header twice and
+ * the text nowhere for nine days). Eight chunks is the ceiling; a delta that
+ * large belongs to an agent coming back from days away, which is exactly when
+ * the backlog is worth the wait.
  */
-const LINE_CEILING = 700;
+const PRELUDE_MAX_CHUNKS = 8;
 
 /**
  * The one line of the note that says WHAT happened, DERIVED rather than asked
@@ -281,50 +290,67 @@ function overflowMark(rows: LedgerRow[], shown: number, total: number): string {
 }
 
 /**
- * The delta block the agent sees ahead of a prompt. English (it is written into
- * the transcript — repo side). ONE line: per row `• [id] entity — status
- * (source)`, the kind when it is not the default `task`, and `↳ <headline>` for
- * what actually happened.
+ * The delta the agent sees ahead of a prompt, as the LIST OF PASTES it travels
+ * in. English (it is written into the transcript — repo side).
  *
- * Labels are served BEFORE any headline, and that order is the whole of it. The
- * first version appended row i's headline before testing whether row i+1 fitted,
- * so the first row's detail outbid the second row's existence — measured on this
- * table, a delta of 2, 5, 7 or 9 rows named exactly ONE of them every time, at
- * any size, while 52 characters of the budget went unspent. `ledger list` gives
- * the reader the notes in one call; nothing gives them back a row they were
- * never told existed.
+ * The ordering rule is "never lose a row, lose the detail first", because the
+ * two failures are not comparable: a row the reader is never told about is a
+ * silo this feature exists to close, while a row named without its sentence is
+ * one `ledger list` away. So the budget is spent in this order, and degrades in
+ * the opposite one:
+ *
+ *   1. every changed row gets `• [id] entity — status (source)`;
+ *   2. the newest `HEADLINE_ROWS` of them also get `↳ <what happened>`;
+ *   3. only if even step 1 does not fit the chunk ceiling do the oldest rows
+ *      collapse into the overflow mark, which still carries their IDS;
+ *   4. and only when there are more of them than we hold does it fall back to
+ *      a bare count.
+ *
+ * Each chunk is one line ending in a newline, under `PASTE_MAX`, so each is
+ * judged on its own by the paste rule and stays in the clear.
  */
-export function formatLedgerBlock(rows: LedgerRow[], total: number): string {
+export function formatLedgerChunks(rows: LedgerRow[], total: number): string[] {
   const head = `${LEDGER_HEAD}${total} update${total === 1 ? "" : "s"}⟧`;
-  const bare = rows.map(bareRow);
-  // 1. How many rows can be named — the overflow mark is part of the bill, so a
-  //    row is only taken when what stands for the rest still fits beside it.
-  let shown = 0;
-  let len = head.length;
-  for (let i = 0; i < bare.length && shown < ROWS_TARGET; i++) {
-    const mark = overflowMark(rows, i + 1, total).length;
-    // Always carry at least one row: a block that announces a delta and names
-    // nothing is worse than a long line.
-    if (shown > 0 && len + bare[i].length + mark > BLOCK_MAX) break;
-    len += bare[i].length;
-    shown++;
-  }
-  const mark = overflowMark(rows, shown, total);
-  // 2. Headlines go in the room that is left, first row first — and only WHOLE:
-  //    a sentence cut by whatever happened to remain is the defect HEADLINE_MAX
-  //    already exists to bound, and it can invert the meaning it loses.
-  let line = head;
-  let used = len + mark.length;
-  for (let i = 0; i < shown; i++) {
-    line += bare[i];
-    const h = headline(rows[i].note);
-    if (h && used + h.length + 3 <= BLOCK_MAX) {
-      line += ` ${CONT_MARK} ${h}`;
-      used += h.length + 3;
+  // Step 1 + 2: what each row is worth saying. The headline is attached to the
+  // newest few only — detail is the thing that degrades, and the newest rows
+  // are the ones a sibling is most likely to be about to act on.
+  const pieces = rows.map((r, i) => {
+    const h = i < HEADLINE_ROWS ? headline(r.note) : "";
+    return bareRow(r) + (h ? ` ${CONT_MARK} ${h}` : "");
+  });
+  // Pack greedily into one-line chunks. A row is never split across two pastes:
+  // half a row in the clear and half in another reads as two rows.
+  const pack = (n: number): string[] => {
+    const parts = [...pieces.slice(0, n), overflowMark(rows, n, total)].filter(Boolean);
+    const out: string[] = [];
+    let line = head;
+    for (const part of parts) {
+      if (line !== head && line.length + part.length > PASTE_MAX) {
+        out.push(line + "\n");
+        line = "";
+      }
+      line += part;
     }
-  }
-  line += mark;
-  return line.length > LINE_CEILING ? line.slice(0, LINE_CEILING - 1) + "…" : line;
+    if (line) out.push(line + "\n");
+    return out;
+  };
+  // Step 3: how many rows fit at all. The ceiling is counted on the PACKED
+  // result, never estimated from a character budget: greedy packing leaves a
+  // chunk short whenever the next row does not fit, so the two do not agree —
+  // and the quantity that costs (a wait per paste) is the chunk count.
+  // Always carry at least one row: a block that announces a delta and names
+  // nothing is worse than a long one.
+  let kept = pieces.length;
+  let chunks = pack(kept);
+  while (kept > 1 && chunks.length > PRELUDE_MAX_CHUNKS) chunks = pack(--kept);
+  return chunks;
+}
+
+/** The same delta as ONE string — what lands in the transcript, and what the
+ *  display then strips. The pastes are concatenated by the TUI exactly like
+ *  this, so this is the text, not a rendering of it. */
+export function formatLedgerBlock(rows: LedgerRow[], total: number): string {
+  return formatLedgerChunks(rows, total).join("").replace(/\n$/, "");
 }
 
 /** Prepend the block as its own leading line. Idempotent.
@@ -365,7 +391,11 @@ export function stripLedgerBlock(text: string): string {
   if (!hasLedgerBlock(text)) return text;
   const lines = text.split("\n");
   let i = 1; // drop the header line
-  while (i < lines.length && (lines[i].startsWith("• ") || CONT_LINE.test(lines[i]))) i++;
+  // A continuation chunk starts with the ` • ` of its first row, so the bullet
+  // test is made on the TRIMMED line: the leading space is a separator between
+  // rows, not indentation, and anchoring on it would leave every chunk but the
+  // first sitting in the displayed message.
+  while (i < lines.length && (lines[i].trimStart().startsWith("• ") || CONT_LINE.test(lines[i]))) i++;
   // …and the blank lines it leaves behind. The block now travels as its OWN
   // paste, so the transcript holds `</pasted_content>` and a blank line between
   // it and the ⟦platform⟧ header; `userPromptText` peels the tags but not the
