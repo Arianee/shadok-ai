@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   shouldReattachBridge,
   senderName,
+  replyContext,
   shouldPreempt,
   pasteExtension,
   pasteFileName,
@@ -712,4 +713,76 @@ test("voice wins over nothing, and never shadows a real attachment", () => {
   assert.equal(doc!.kind, "file");
   // And a message with neither is still nothing to act on.
   assert.equal(attachmentOf({ text: "hello" }), null);
+});
+
+test("replyContext: a reply quotes who said what", () => {
+  // The whole point: "fix that" answering a message from ten minutes ago is
+  // unreadable without the thing it answers.
+  const ctx = replyContext({
+    reply_to_message: { text: "PR #227 is merged", from: { first_name: "Ada" } },
+  });
+  assert.equal(ctx, '⟦replying to Ada⟧ "PR #227 is merged"');
+});
+
+test("replyContext: the agent's own message is named as the agent", () => {
+  // A bot has a first_name too ("shadok-ai-test"), and quoting it by that name
+  // would read as a third participant in the conversation.
+  const ctx = replyContext({
+    reply_to_message: { text: "Done, 937 tests green.", from: { is_bot: true, first_name: "shadok" } },
+  });
+  assert.equal(ctx, '⟦replying to the agent⟧ "Done, 937 tests green."');
+});
+
+test("replyContext: a highlighted fragment beats the whole message", () => {
+  // Telegram lets you select part of a message when replying (Bot API 7.0).
+  // That selection IS the user pointing at something: honour it over the rest.
+  const ctx = replyContext({
+    quote: { text: "the 20 s timeout" },
+    reply_to_message: { text: "a very long message about many other things", from: { first_name: "Ada" } },
+  });
+  assert.equal(ctx, '⟦replying to Ada⟧ "the 20 s timeout"');
+});
+
+test("replyContext: the topic's own creation message is NOT a reply", () => {
+  // THE trap: in a forum topic every message carries reply_to_message pointing
+  // at the topic's creation service message. Quoting it would staple a useless
+  // line onto every single message in every topic.
+  assert.equal(
+    replyContext({ reply_to_message: { forum_topic_created: { name: "preempt" }, from: { first_name: "Ada" } } }),
+    undefined,
+  );
+});
+
+test("replyContext: no reply, nothing added", () => {
+  assert.equal(replyContext({ text: "hello" }), undefined);
+  assert.equal(replyContext({}), undefined);
+});
+
+test("replyContext: a media reply says what it is rather than quoting nothing", () => {
+  // An empty quote ('⟦replying to Ada⟧ ""') reads as a bug; naming the medium
+  // at least tells the agent what was pointed at.
+  assert.equal(
+    replyContext({ reply_to_message: { photo: [{}], from: { first_name: "Ada" } } }),
+    "⟦replying to Ada⟧ [a photo]",
+  );
+  assert.equal(
+    replyContext({ reply_to_message: { document: {}, caption: "the log", from: { first_name: "Ada" } } }),
+    '⟦replying to Ada⟧ "the log"',
+  );
+});
+
+test("replyContext: a long quote is cut, and says that it was", () => {
+  // The quote rides on every prompt: unbounded, it would crowd out the message
+  // it is supposed to contextualise.
+  const long = "x".repeat(600);
+  const ctx = replyContext({ reply_to_message: { text: long, from: { first_name: "Ada" } } })!;
+  assert.ok(ctx.length < 420, `quote not bounded: ${ctx.length}`);
+  assert.ok(ctx.endsWith('…"'), ctx.slice(-20));
+});
+
+test("replyContext: newlines in a quote stay on one line", () => {
+  // The quote sits above the message; a multi-line one would be read as part of
+  // what the human wrote.
+  const ctx = replyContext({ reply_to_message: { text: "line one\nline two", from: { first_name: "Ada" } } });
+  assert.equal(ctx, '⟦replying to Ada⟧ "line one line two"');
 });
