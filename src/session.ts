@@ -1,6 +1,6 @@
 import pty from "node-pty";
 import xterm from "@xterm/headless";
-import { idleStep, screenShowsWork, inputText, describeStuckScreen, typeIntoBox } from "./detect.js";
+import { idleStep, settleStep, DIALOG_HOLD_MS, screenShowsWork, inputText, describeStuckScreen, typeIntoBox } from "./detect.js";
 
 const { Terminal } = xterm;
 
@@ -61,6 +61,14 @@ export interface WaitIdleOptions extends WaitOptions {
    * effect on the next one instead of at the next turn.
    */
   stableMs?: number | (() => number);
+  /**
+   * Names the dialog on a screen (`null` = none). When given, the wait ALSO
+   * ends once the same dialog has held for `DIALOG_HOLD_MS`, even if the screen
+   * never stops moving — a dialog can carry a per-second countdown, and then
+   * `stableMs` is never met (see `settleStep`). The pilots stay ignorant of what
+   * a dialog is; the caller, which owns that policy, supplies the reading.
+   */
+  settleOn?: (screen: string) => string | null;
 }
 
 
@@ -264,15 +272,25 @@ export class PtyPilot {
   async waitForIdle({
     stableMs = 1_500,
     timeoutMs = 600_000,
+    settleOn,
   }: WaitIdleOptions = {}): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     let lastScreen = "";
     let stableSince = 0;
+    let lastKey: string | null = null;
+    let keySince = 0;
     while (Date.now() < deadline) {
       if (this.exited) throw new Error("The claude process has exited.");
       const s = this.screen();
-      const step = idleStep(s, lastScreen, stableSince, Date.now(), windowMs(stableMs));
+      const now = Date.now();
+      const step = idleStep(s, lastScreen, stableSince, now, windowMs(stableMs));
       if (step.done) return s;
+      if (settleOn) {
+        const settle = settleStep(s, settleOn(s), lastKey, keySince, now, DIALOG_HOLD_MS);
+        if (settle.done) return s;
+        lastKey = settle.lastKey;
+        keySince = settle.since;
+      }
       stableSince = step.stableSince;
       lastScreen = step.lastScreen;
       await sleep(150);

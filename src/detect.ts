@@ -65,6 +65,51 @@ export function idleStep(
 }
 
 /**
+ * How long the SAME dialog must stay on screen before {@link settleStep} ends
+ * the wait on it. Short — a dialog is not inferred from silence, it is read off
+ * the screen — but not one poll: a half-painted dialog (question up, options
+ * still arriving) would otherwise be read and published as a different one.
+ */
+export const DIALOG_HOLD_MS = 400;
+
+/**
+ * The OTHER way a turn can end: a dialog is on screen. Runs beside
+ * {@link idleStep}, never instead of it.
+ *
+ * `idleStep` alone cannot see a dialog that carries a clock. Claude Code
+ * (≥ 2.1.284) renders some permission prompts with "⚠ Claude Code will
+ * automatically deny this request in 1:43…" — a countdown that repaints EVERY
+ * SECOND and auto-denies at 0:00. Measured on a real pane: longest
+ * byte-identical window 678 ms, against the 2000 ms the production wait
+ * requires. So the wait never ended, nothing ever read the dialog, and after
+ * 120 s the request was denied without the cockpit ever being asked.
+ *
+ * So identity, not bytes: `key` is the caller's name for the dialog it sees
+ * (`null` = none). The step settles once the same non-null key has held for
+ * `holdMs`, however much the rest of the screen moves. The countdown is in
+ * neither the question nor the labels, so it never resets the hold — and no
+ * upstream wording is matched to get there, so a spinner or a progress line in
+ * a future dialog is covered the same way.
+ *
+ * The work check stays above everything, exactly as in `idleStep`: a screen
+ * showing work is never a dialog to settle on, whatever the caller thinks.
+ */
+export function settleStep(
+  screen: string,
+  key: string | null,
+  lastKey: string | null,
+  since: number,
+  now: number,
+  holdMs: number,
+): { done: boolean; since: number; lastKey: string | null } {
+  if (key === null || screenShowsWork(screen)) return { done: false, since: 0, lastKey: null };
+  // A different dialog (or the first sighting) restarts the hold — and never
+  // settles on the spot, whatever `holdMs` says.
+  if (key !== lastKey) return { done: false, since: now, lastKey: key };
+  return { done: now - since >= holdMs, since, lastKey: key };
+}
+
+/**
  * True while the text we just typed is still sitting in the input box (the
  * last "❯ …" line). Used to confirm a submit: before Enter the probe is in the
  * box; once Enter is accepted the box clears, so `!inputHasProbe` means "sent".
