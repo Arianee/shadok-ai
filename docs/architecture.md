@@ -122,6 +122,14 @@ design, and a raw pipe plus a rendered snapshot of the same pane can disagree.
 3. **turn**: `prompt` → pace gate (unless `force`) → `pilot.submit()` →
    `finishTurn()` waits for idle, then broadcasts either a `dialog` (interactive
    question) or `turn-done`. Content streams independently via the tail.
+   "Idle" has two ways in, both behind the work check (`src/detect.ts`):
+   `idleStep` (the screen held byte-identical for `stableMs`) and `settleStep`
+   (the same dialog, by `dialogKey`, held for `DIALOG_HOLD_MS`). The second
+   exists because a dialog can carry a per-second countdown — Claude Code's
+   auto-deny timer — and then the screen never holds still: measured, 678 ms
+   longest stable window against the 2000 ms required, so the question was
+   auto-denied without ever being published. Identity instead of bytes, and no
+   upstream wording matched to get there.
 4. **screen watcher** (300 ms): broadcasts `screen`, `background` — the shells
    and monitors the pane reports, read off its own footer and sent only when
    they MOVE, which is what makes a script an agent left running visible instead

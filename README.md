@@ -755,7 +755,7 @@ Main API:
 | `submit(text)` | types a prompt + Enter, with verification and retries |
 | `write(text)` / `press(key)` | low-level keystrokes (`enter`, `escape`, `up`, `tab`, `ctrl-c`…) |
 | `screen()` / `fullBuffer()` | rendered screen / full buffer |
-| `waitForIdle({stableMs, timeoutMs})` | waits for the end of a turn |
+| `waitForIdle({stableMs, timeoutMs, settleOn?})` | waits for the end of a turn; `settleOn(screen)` names a dialog (or `null`) so a dialog that never holds still — a ticking countdown — still ends the wait |
 | `waitFor(predicate)` | waits for an arbitrary screen condition (dialogs, permissions…) |
 | `isWorking()` | true while Claude is working |
 | `onData(cb)` / `onExit(cb)` | raw ANSI stream (mirror mode) / process exit |

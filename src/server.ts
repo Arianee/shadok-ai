@@ -3450,6 +3450,26 @@ function workingMessage(s: Live): { type: "working"; startedAt: number | null; e
  */
 const INTERRUPTED_STABLE_MS = 400;
 
+/**
+ * What `waitForIdle` may settle on besides a still screen: a real question.
+ *
+ * A dialog IS a turn boundary, and a dialog can carry a per-second countdown
+ * (Claude Code's auto-deny timer) that keeps the screen from ever holding still
+ * for `stableMs` — so byte-stability alone never ended the wait, and the
+ * question was auto-denied without anyone being asked. Keyed by `dialogKey`,
+ * the dedup identity `publishDialog` already uses (question + labels): a ticking
+ * clock or a cursor move is not a new dialog, and does not reset the hold.
+ *
+ * The multi-question recap page is left out on purpose: it is not a question
+ * (invariant 30), and right after the Enter that confirms it the screen still
+ * shows it for a moment — settling there would end the wait before the turn it
+ * submits has even started. It carries no clock, so a still screen ends it.
+ */
+function dialogSettleKey(screen: string): string | null {
+  const d = detectDialog(screen);
+  return d && !SUBMIT_PAGE.test(screen) ? dialogKey(d) : null;
+}
+
 async function finishTurn(s: Live) {
   s.busy = true;
   // Turn found already running (not started by us): typically after a server
@@ -3465,6 +3485,7 @@ async function finishTurn(s: Live) {
     await s.pilot.waitForIdle({
       stableMs: () => (s.interruptedAt ? INTERRUPTED_STABLE_MS : 2000),
       timeoutMs: 900_000,
+      settleOn: dialogSettleKey,
     });
     // A MULTI-QUESTION AskUserQuestion ends on a recap page ("Ready to submit
     // your answers? · Submit answers / Cancel"). That is NOT a real question —
@@ -3473,7 +3494,7 @@ async function finishTurn(s: Live) {
     // instead of surfacing a redundant, mis-rendered dialog.
     if (detectDialog(s.pilot.screen()) && SUBMIT_PAGE.test(s.pilot.screen())) {
       s.pilot.press("enter");
-      await s.pilot.waitForIdle({ stableMs: 1500, timeoutMs: 120_000 }).catch(() => {});
+      await s.pilot.waitForIdle({ stableMs: 1500, timeoutMs: 120_000, settleOn: dialogSettleKey }).catch(() => {});
     }
     const dialog = detectDialog(s.pilot.screen());
     if (dialog) {
