@@ -192,6 +192,57 @@ export function dmGate(owner: number | null, from: number | undefined): "claim" 
   return owner === from ? "allow" : "deny";
 }
 
+/** How much of a quoted message rides along. It is prepended to EVERY reply, so
+ *  unbounded it would crowd out the message it exists to contextualise. */
+const QUOTE_MAX = 300;
+
+/**
+ * The line that tells the agent WHICH message a Telegram reply answers.
+ *
+ * Replying to something from ten minutes ago is ordinary in a chat, and until
+ * now the agent received "fix that" with no trace of the thing being fixed —
+ * `reply_to_message` was read only to recover a topic's name.
+ *
+ * Three decisions worth keeping:
+ *
+ * The forum trap. In a topic EVERY message carries `reply_to_message`, pointing
+ * at the topic's own creation service message. Quoting that would staple a
+ * useless line onto every message in every topic, so it is explicitly not a
+ * reply.
+ *
+ * A highlighted fragment wins. Telegram lets the user select part of a message
+ * when replying (`quote`, Bot API 7.0). That selection IS them pointing at
+ * something; honouring the whole message instead would discard the aim.
+ *
+ * A bot is "the agent". A bot has a `first_name` too, and quoting the agent's
+ * own words under that name reads as a third participant in the conversation.
+ *
+ * Pure — unit tested.
+ */
+export function replyContext(msg: {
+  quote?: { text?: string };
+  reply_to_message?: Record<string, unknown> & { from?: { is_bot?: boolean; first_name?: string; last_name?: string; username?: string } };
+}): string | undefined {
+  const r = msg.reply_to_message;
+  if (!r) return undefined;
+  // The topic's own creation message: carried by every message in the topic.
+  if (r.forum_topic_created) return undefined;
+
+  const who = r.from?.is_bot ? "the agent" : (senderName(r.from) ?? "someone");
+  const picked = (msg.quote?.text ?? (r.text as string | undefined) ?? (r.caption as string | undefined) ?? "").trim();
+  if (picked) {
+    // One line: the quote sits above the message, and a multi-line one would
+    // read as part of what the human wrote.
+    const flat = picked.replace(/\s+/g, " ");
+    const cut = flat.length > QUOTE_MAX ? flat.slice(0, QUOTE_MAX) + "…" : flat;
+    return `⟦replying to ${who}⟧ "${cut}"`;
+  }
+  // Nothing quotable: name the medium rather than print an empty quote, which
+  // reads as a rendering bug.
+  const medium = r.photo ? "a photo" : r.document ? "a file" : r.voice ? "a voice message" : r.video ? "a video" : r.sticker ? "a sticker" : "a message";
+  return `⟦replying to ${who}⟧ [${medium}]`;
+}
+
 /** The known origins: the icon that stands for them, and the word they print.
  *  An unknown origin keeps its own name: better "someone spoke" than a message
  *  that looks like it came from the agent. */
@@ -599,6 +650,10 @@ interface Bridge {
   // qu'on a soumis, celui qu'on rejouera après l'échap, et celui pour lequel on
   // a DÉJÀ interrompu une fois — la borne qui empêche la boucle.
   lastSent?: string;
+  /** Who wrote `lastSent`. Kept because a preempted message is RESENT, and
+   *  resending it without its author made it arrive anonymous — the cockpit
+   *  showed a nameless sender for a message whose author we knew all along. */
+  lastSentFrom?: string;
   preempting?: string;
   lastRetried?: string;
   preemptTimer?: ReturnType<typeof setTimeout>;
@@ -1030,7 +1085,7 @@ export function startTelegram(port: number, authCookie?: string): TelegramHandle
             const text = b.preempting;
             b.preempting = undefined;
             clearTimeout(b.preemptTimer);
-            promptTo(b, text, undefined, true);
+            promptTo(b, text, b.lastSentFrom, true);
             break;
           }
           b.typing.stop();
@@ -1109,6 +1164,8 @@ export function startTelegram(port: number, authCookie?: string): TelegramHandle
   // name the author instead of showing an anonymous "pilot (elsewhere)".
   const promptTo = (b: Bridge, text: string, from?: string, resend = false, voice = false) => {
     b.lastSent = text;
+    // A resend must keep the original author; only a NEW message sets one.
+    if (!resend) b.lastSentFrom = from;
     // Un message NEUF rouvre le droit d'interrompre ; un renvoi, non — sinon
     // deux clients qui se disputent la session se relancent indéfiniment.
     if (!resend) b.lastRetried = undefined;
@@ -1548,7 +1605,9 @@ export function startTelegram(port: number, authCookie?: string): TelegramHandle
           promptTo(b, caption ? `${out.text}\n\n${caption}` : out.text, senderName(msg.from), false, true);
           return;
         }
-        promptTo(b, attachmentPrompt([{ path: p, kind: att.kind }], caption), senderName(msg.from));
+        const attQuote = replyContext(msg);
+        const attText = attachmentPrompt([{ path: p, kind: att.kind }], caption);
+        promptTo(b, attQuote ? attQuote + "\n" + attText : attText, senderName(msg.from));
       } catch (e: any) {
         b.typing.stop();
         await reply(
@@ -1570,7 +1629,10 @@ export function startTelegram(port: number, authCookie?: string): TelegramHandle
       else b.pendingActions.push(wsMsg);
       return;
     }
-    promptTo(b, msg.text, senderName(msg.from));
+    // A reply carries the message it answers: without it the agent reads
+    // "fix that" with no trace of what "that" is.
+    const quoted = replyContext(msg);
+    promptTo(b, quoted ? quoted + "\n" + msg.text : msg.text, senderName(msg.from));
   };
 
   const handleCallback = async (cq: any) => {
