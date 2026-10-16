@@ -70,6 +70,18 @@ test("parseWhisperText strips timestamps a build may emit despite -nt", () => {
   assert.equal(parseWhisperText("[BLANK_AUDIO]"), "");
 });
 
+test("a sound tag is not speech, in parentheses as well as in brackets", () => {
+  // Measured, not imagined: a pure 440 Hz tone in a video came back as
+  // `(Bell)`. Quoted to the agent as ⟦heard in the video⟧ it reads as
+  // something the user said — the video path makes this reach further than
+  // voice notes ever did, since any clip carries ambient sound.
+  assert.equal(parseWhisperText("(Bell)"), "");
+  assert.equal(parseWhisperText("(wind blowing)"), "");
+  assert.equal(parseWhisperText("[MUSIC]\n(applause)"), "");
+  // But a tag INSIDE a sentence is part of what was said.
+  assert.equal(parseWhisperText("(laughs) yes, ship it"), "(laughs) yes, ship it");
+});
+
 test("an empty transcription is REPORTED, never sent on as an empty prompt", () => {
   // Otherwise a voice note that produced nothing is indistinguishable from the
   // silent drop this whole feature exists to remove.

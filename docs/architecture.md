@@ -409,6 +409,23 @@ Without this gate a public bot username is an open shell.
   nothing ever comes along to edit it away.
 - **Attachments**: photos and documents are downloaded and handed to Claude
   Code as file paths; a media group is buffered and flushed as one prompt.
+  The list of fields `attachmentOf` reads IS the list of messages the bot can
+  receive — anything missing from it is dropped by `handleMessage`, which takes
+  neither text nor attachment as nothing to do. A video was missing for exactly
+  that reason, and vanished without a trace.
+- **Videos** (`src/video.ts`): a path to an mp4 is a dead end — `Read` opens
+  images, PDFs and text, and the image carries no `ffmpeg` on `PATH`. So the
+  bridge looks at the clip on the agent's behalf, over the static ffmpeg the
+  voice pipeline already provisions (`ensureFfmpeg`, split out of
+  `ensureWhisper` so stills never cost a 600 MB speech install): a handful of
+  **stills**, each taken mid-slice because a first frame is routinely black,
+  plus the **audio track transcribed** when there is speech worth the wait. The
+  prompt says to READ the stills — a model handed an mp4 and some images
+  without that sentence answers that it cannot watch videos. Audio deliberately
+  left unheard (a clip past `TRANSCRIBE_MAX_SEC`, an album) is NAMED in the
+  prompt; a genuinely silent clip says nothing. Over 20 MB the Bot API refuses
+  to serve the file at all, which the topic reports as a ceiling rather than as
+  an error.
 - `/secret NAME value` deletes the user's message after storing, so the value
   doesn't linger in chat history (needs *Delete messages* admin rights).
 
