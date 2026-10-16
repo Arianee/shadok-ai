@@ -21,6 +21,7 @@ import {
 import { secretNames, setSecret, deleteSecret } from "./secrets.js";
 import { telegramPhotoable } from "./download.js";
 import { transcribe, heardNotice } from "./whisper.js";
+import { clock, lookAtVideo, MAX_FRAMES, ALBUM_FRAMES } from "./video.js";
 import { authStatus, startLogin, submitLoginCode } from "./claude-auth.js";
 import { getProfile, profileNames } from "./profiles.js";
 import { tmuxHasSession } from "./tmux.js";
@@ -300,15 +301,31 @@ export interface TgAttachment {
   fileUniqueId: string;
   /** `voice` is spoken input, not a file to hand the agent: it is transcribed
    *  and the TEXT becomes the prompt. Keeping it a separate kind is what stops
-   *  an .ogg being dropped on an agent that cannot read audio. */
-  kind: "image" | "file" | "voice";
-  fileName?: string; // original name (documents only)
+   *  an .ogg being dropped on an agent that cannot read audio. `video` is the
+   *  same idea one step further: an mp4 is unreadable too, so the bridge turns
+   *  it into stills (and, when there is speech, a transcript). */
+  kind: "image" | "file" | "voice" | "video";
+  fileName?: string; // original name (documents, audio)
   fileSize?: number; // bytes, when Telegram provides it
+  mimeType?: string; // Telegram's own, when it sends one
+  durationSec?: number; // video/audio length, straight from Telegram
 }
 
-/** Extract the attachment of a message: a photo (largest size — Telegram
- *  sorts sizes small → large) or any document (PDF, zip, image sent as
- *  file…). Text-only messages → null. */
+/**
+ * Extract the attachment of a message — and the list of fields this looks at IS
+ * the list of messages the bot can receive at all: `handleMessage` drops
+ * anything with neither text nor attachment, so a shape missing here is a
+ * message swallowed in silence.
+ *
+ * That is exactly how a shared VIDEO disappeared: it carries `msg.video`, its
+ * caption in `msg.caption`, and no `msg.text` whatsoever. The voice note had
+ * been the same bug one shape earlier. So the order below is: spoken input, the
+ * moving pictures, then the still ones, then anything else as a file.
+ *
+ * A `sticker` is deliberately NOT here. It is a reaction, not content, and
+ * waking a whole agent turn for an emoji-equivalent costs more than it tells
+ * anyone — a decision, not an oversight.
+ */
 export function attachmentOf(msg: any): TgAttachment | null {
   // Voice FIRST: a voice note also carries no photo and no document, and used
   // to fall through to `null` — so the message was dropped in silence, which is
@@ -320,20 +337,58 @@ export function attachmentOf(msg: any): TgAttachment | null {
       fileUniqueId: v.file_unique_id,
       kind: "voice",
       ...(v.file_size != null ? { fileSize: v.file_size } : {}),
+      ...(v.duration != null ? { durationSec: v.duration } : {}),
+    };
+  }
+  // A video, a GIF (`animation` — Telegram stores it as a soundless mp4) or a
+  // round "telescope" clip (`video_note`). `animation` comes BEFORE `document`
+  // on purpose: Telegram sends both fields for a GIF, and as a document it
+  // would lose its duration and its stills.
+  const mov = msg.video ?? msg.animation ?? msg.video_note;
+  if (mov?.file_id) {
+    return {
+      fileId: mov.file_id,
+      fileUniqueId: mov.file_unique_id,
+      kind: "video",
+      ...(mov.file_name ? { fileName: mov.file_name } : {}),
+      ...(mov.file_size != null ? { fileSize: mov.file_size } : {}),
+      ...(mov.mime_type ? { mimeType: mov.mime_type } : {}),
+      ...(mov.duration != null ? { durationSec: mov.duration } : {}),
     };
   }
   if (Array.isArray(msg.photo) && msg.photo.length) {
     const p = msg.photo[msg.photo.length - 1];
     return { fileId: p.file_id, fileUniqueId: p.file_unique_id, kind: "image", fileSize: p.file_size };
   }
+  // An audio FILE (a music track, a forwarded memo) — handed over as a file
+  // rather than transcribed: a 40-minute track would hold a turn hostage for
+  // the best part of an hour, and nobody shares an album for its lyrics. The
+  // point here is that it stops vanishing.
+  const a = msg.audio;
+  if (a?.file_id) {
+    return {
+      fileId: a.file_id,
+      fileUniqueId: a.file_unique_id,
+      kind: "file",
+      ...(a.file_name ? { fileName: a.file_name } : {}),
+      ...(a.file_size != null ? { fileSize: a.file_size } : {}),
+      ...(a.mime_type ? { mimeType: a.mime_type } : {}),
+      ...(a.duration != null ? { durationSec: a.duration } : {}),
+    };
+  }
   const d = msg.document;
   if (d?.file_id) {
     return {
       fileId: d.file_id,
       fileUniqueId: d.file_unique_id,
-      kind: typeof d.mime_type === "string" && d.mime_type.startsWith("image/") ? "image" : "file",
+      kind: typeof d.mime_type === "string" && d.mime_type.startsWith("video/")
+        ? "video"
+        : typeof d.mime_type === "string" && d.mime_type.startsWith("image/")
+          ? "image"
+          : "file",
       ...(d.file_name ? { fileName: d.file_name } : {}),
       ...(d.file_size != null ? { fileSize: d.file_size } : {}),
+      ...(d.mime_type ? { mimeType: d.mime_type } : {}),
     };
   }
   return null;
@@ -385,21 +440,110 @@ export function pasteFileName(id: string, name: string, contentType: string): st
   return base ? `paste-${id}-${base}.${ext}` : `paste-${id}.${ext}`;
 }
 
+/**
+ * A WHITELIST from Telegram's mime type to an extension, for the media that
+ * arrives without a file name — a camera video has none.
+ *
+ * Same rule as `pasteExtension`: never split on "/", since the result lands in
+ * a filename. Unknown → null, and the caller decides what is honest.
+ */
+const MEDIA_EXT: Record<string, string> = {
+  "video/mp4": "mp4",
+  "video/quicktime": "mov",
+  "video/webm": "webm",
+  "video/x-matroska": "mkv",
+  "video/mpeg": "mpeg",
+  "audio/mpeg": "mp3",
+  "audio/mp4": "m4a",
+  "audio/ogg": "ogg",
+  "audio/x-wav": "wav",
+  "audio/wav": "wav",
+};
+
+/** The extension a downloaded attachment should carry, or null when unknown.
+ *  ffmpeg sniffs the container anyway, so this is for the humans and for the
+ *  agent reading the path — being truthful matters more than being clever. */
+export function mediaExtension(att: TgAttachment): string | null {
+  const fromMime = att.mimeType ? MEDIA_EXT[att.mimeType.split(";")[0].trim().toLowerCase()] : undefined;
+  if (fromMime) return fromMime;
+  if (att.kind === "image") return "jpg";
+  // A video Telegram transcoded itself is always mp4; saying nothing would
+  // leave the file extension-less, which reads as "unknown binary".
+  if (att.kind === "video") return "mp4";
+  return null;
+}
+
 /** Storage name under ~/.shadok-ai/media: keep the original name so Claude
  *  has context, prefix with file_unique_id to avoid collisions, and strip
  *  anything path-ish or shell-hostile. */
 export function mediaFileName(att: TgAttachment): string {
   const base = att.fileName ? path.basename(att.fileName).replace(/[^\w.\- ]+/g, "_") : "";
   if (base) return `${att.fileUniqueId}-${base}`;
-  return att.kind === "image" ? `${att.fileUniqueId}.jpg` : att.fileUniqueId;
+  const ext = mediaExtension(att);
+  return ext ? `${att.fileUniqueId}.${ext}` : att.fileUniqueId;
 }
 
-/** The prompt sent to the session for downloaded attachments: one absolute
- *  path per line (Claude reads them itself — Read for images/PDF/text,
- *  Bash for the rest), then the user's caption if any. */
-export function attachmentPrompt(items: { path: string; kind: "image" | "file" }[], caption?: string): string {
-  const lines = items.map((i) => (i.kind === "image" ? `[Attached image: ${i.path}]` : `[Attached file: ${i.path}]`));
+/** One downloaded attachment, as the prompt describes it. */
+export interface PromptItem {
+  path: string;
+  kind: "image" | "file" | "video";
+  /** Video only: its length, and the stills pulled out of it. */
+  durationSec?: number;
+  frames?: { path: string; atSec: number }[];
+  /** Video only: the speech heard in the audio track. */
+  transcript?: string;
+  /** Video only: why there is no transcript, when that is worth saying — an
+   *  agent that is told nothing about the audio assumes there was none. */
+  audioNote?: string;
+}
+
+/**
+ * The prompt sent to the session for downloaded attachments: one absolute path
+ * per line (Claude reads them itself — Read for images/PDF/text, Bash for the
+ * rest), then the user's caption if any.
+ *
+ * A video is the one that needs words around it. The path alone is a dead end
+ * (nothing in `Read` opens an mp4), so it comes with its stills — and with the
+ * sentence that says to READ them: a model told about a video and handed images
+ * next to it still answers "I can't watch videos" unless the link between the
+ * two is spelled out. Verified on exactly that failure.
+ */
+export function attachmentPrompt(items: PromptItem[], caption?: string): string {
+  const lines: string[] = [];
+  for (const i of items) {
+    if (i.kind === "video") {
+      const len = i.durationSec ? ` (${clock(i.durationSec)})` : "";
+      lines.push(`[Attached video: ${i.path}${len}]`);
+      if (i.frames?.length) {
+        lines.push("Stills from it — read these images to see the video:");
+        i.frames.forEach((f, n) =>
+          lines.push(`[Attached image: ${f.path}] frame ${n + 1}/${i.frames!.length} at ${clock(f.atSec)}`),
+        );
+      }
+      if (i.transcript?.trim()) lines.push(`⟦heard in the video⟧ "${i.transcript.trim()}"`);
+      else if (i.audioNote) lines.push(`⟦video audio⟧ ${i.audioNote}`);
+      continue;
+    }
+    lines.push(i.kind === "image" ? `[Attached image: ${i.path}]` : `[Attached file: ${i.path}]`);
+  }
   return caption?.trim() ? lines.join("\n") + "\n" + caption : lines.join("\n");
+}
+
+/** What a bot simply cannot fetch: the Bot API caps `getFile` at 20 MB, and no
+ *  code on our side lifts it — so the notice names both sizes and the two
+ *  things that do work. */
+export function tooLargeNotice(att: TgAttachment): string {
+  const mb = att.fileSize ? `${(att.fileSize / 1_000_000).toFixed(1)} MB` : "this file";
+  const what = att.kind === "video" ? "video" : att.kind === "image" ? "image" : "file";
+  return `⚠️ Telegram only lets a bot download up to 20 MB, and this ${what} is ${mb}. Send a shorter clip, or compress it — a link to the file works too.`;
+}
+
+/** Was this download refused by the 20 MB ceiling rather than broken? The size
+ *  we were told is the honest signal; Telegram's own wording is the fallback
+ *  for a file it never sized. */
+export function tooBigFor(att: TgAttachment, err: any): boolean {
+  if (att.fileSize && att.fileSize > TG_FILE_LIMIT) return true;
+  return /too (big|large)/i.test(String(err?.message ?? err ?? ""));
 }
 
 const htmlEscape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -1201,7 +1345,7 @@ export function startTelegram(port: number, authCookie?: string): TelegramHandle
   const albums = makeAlbumBuffer<{ b: Bridge; att: TgAttachment; caption?: string; from?: string }>(async (_gid, items) => {
     const b = items[0].b;
     const caption = items.find((i) => i.caption)?.caption;
-    const ok: { path: string; kind: "image" | "file" }[] = [];
+    const ok: PromptItem[] = [];
     const failed: string[] = [];
     for (const i of items) {
       try {
@@ -1209,9 +1353,31 @@ export function startTelegram(port: number, authCookie?: string): TelegramHandle
         // happen — but the album prompt hands PATHS to an agent that cannot
         // read audio, and a defensive skip is cheaper than finding out.
         if (i.att.kind === "voice") continue;
-        ok.push({ path: await downloadAttachment(i.att), kind: i.att.kind });
+        const p = await downloadAttachment(i.att);
+        const item: PromptItem = { path: p, kind: i.att.kind };
+        if (i.att.kind === "video") {
+          // Two stills per clip and no transcription: ten videos in one album
+          // would otherwise mean sixty images and several minutes of whisper
+          // before the agent is even woken.
+          const look = await lookAtVideo(p, {
+            durationSec: i.att.durationSec,
+            maxFrames: ALBUM_FRAMES,
+            transcribe: false,
+            notify: (line) => void reply(b.chatId, b.threadId, line),
+          });
+          Object.assign(item, {
+            ...(look.durationSec ? { durationSec: look.durationSec } : {}),
+            ...(look.frames ? { frames: look.frames } : {}),
+            ...(look.audioNote ? { audioNote: look.audioNote } : {}),
+          });
+        }
+        ok.push(item);
       } catch (e: any) {
-        failed.push(`${i.att.fileName ?? i.att.fileUniqueId} (${e?.message ?? e})`);
+        failed.push(
+          tooBigFor(i.att, e)
+            ? `${i.att.fileName ?? i.att.fileUniqueId} (over the 20 MB Telegram ceiling)`
+            : `${i.att.fileName ?? i.att.fileUniqueId} (${e?.message ?? e})`,
+        );
       }
     }
     if (failed.length) reply(b.chatId, b.threadId, "⚠️ download failed: " + failed.join(", "));
@@ -1606,14 +1772,38 @@ export function startTelegram(port: number, authCookie?: string): TelegramHandle
           return;
         }
         const attQuote = replyContext(msg);
-        const attText = attachmentPrompt([{ path: p, kind: att.kind }], caption);
+        // A video is not readable as a file: it is looked AT (stills) and
+        // listened to (its audio track), both over the ffmpeg the voice
+        // pipeline already provisions. Without this the agent received a path
+        // to an mp4 and answered that it cannot watch videos.
+        const item: PromptItem = { path: p, kind: att.kind };
+        if (att.kind === "video") {
+          const look = await lookAtVideo(p, {
+            durationSec: att.durationSec,
+            maxFrames: MAX_FRAMES,
+            notify: (line) => void reply(chat.id, threadId, line),
+          });
+          if (look.trouble) await reply(chat.id, threadId, look.trouble);
+          Object.assign(item, {
+            ...(look.durationSec ? { durationSec: look.durationSec } : {}),
+            ...(look.frames ? { frames: look.frames } : {}),
+            ...(look.transcript ? { transcript: look.transcript } : {}),
+            ...(look.audioNote ? { audioNote: look.audioNote } : {}),
+          });
+        }
+        const attText = attachmentPrompt([item], caption);
         promptTo(b, attQuote ? attQuote + "\n" + attText : attText, senderName(msg.from));
       } catch (e: any) {
         b.typing.stop();
+        // The 20 MB ceiling is the common case for a phone video, and it is not
+        // an error on anyone's side — so it gets its own actionable wording
+        // instead of a raw message the user can do nothing with.
         await reply(
           chat.id,
           threadId,
-          `⚠️ could not download ${att.fileName ?? "the attachment"} (${e?.message ?? e})`,
+          tooBigFor(att, e)
+            ? tooLargeNotice(att)
+            : `⚠️ could not download ${att.fileName ?? "the attachment"} (${e?.message ?? e})`,
         );
       }
       return;

@@ -156,6 +156,14 @@ Enter to skip; you can add it later from the web UI).
   `SHADOK_WHISPER_MODEL` picks a bigger one if your recordings need it.
   Set `SHADOK_WHISPER_DIR` to a directory shared between containers and one copy
   serves them all.
+- **Videos on Telegram** — share a video (or a GIF, or a round video note) and
+  the agent actually sees it: shadok pulls a handful of stills out of the clip
+  for it to look at, and transcribes the sound when there is speech. Both run
+  on the same locally-installed toolchain as voice notes, so nothing leaves the
+  machine. Clips longer than two minutes keep their stills and the prompt says
+  the audio was left unheard — ask and the agent can listen. Telegram caps what
+  a bot may download at 20 MB; past that you get a clear notice instead of
+  silence.
 - **Run the command an agent asks you to** — when an agent writes `! cmd` for
   you to run (typically because it cannot), a ▶ button under its message runs it
   in the agent's shell after a confirmation showing the exact command. It is

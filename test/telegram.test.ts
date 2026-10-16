@@ -16,7 +16,10 @@ import {
   mdToTelegramHtml,
   attachmentOf,
   mediaFileName,
+  mediaExtension,
   attachmentPrompt,
+  tooLargeNotice,
+  tooBigFor,
   makeAlbumBuffer,
   migratedGroupId,
   prefaceMatches,
@@ -320,7 +323,16 @@ test("attachmentOf: document image/* → kind image, keeps the name", () => {
   const att = attachmentOf({
     document: { file_id: "f", file_unique_id: "u", file_name: "shot.png", mime_type: "image/png", file_size: 42 },
   });
-  assert.deepEqual(att, { fileId: "f", fileUniqueId: "u", kind: "image", fileName: "shot.png", fileSize: 42 });
+  assert.deepEqual(att, {
+    fileId: "f",
+    fileUniqueId: "u",
+    kind: "image",
+    fileName: "shot.png",
+    fileSize: 42,
+    // Carried since videos needed it: the mime is what names a file that
+    // arrives without one (a camera video has no file_name at all).
+    mimeType: "image/png",
+  });
 });
 
 test("attachmentOf: any other document → kind file", () => {
@@ -785,4 +797,144 @@ test("replyContext: newlines in a quote stay on one line", () => {
   // what the human wrote.
   const ctx = replyContext({ reply_to_message: { text: "line one\nline two", from: { first_name: "Ada" } } });
   assert.equal(ctx, '⟦replying to Ada⟧ "line one line two"');
+});
+
+/**
+ * The shapes that used to vanish. `handleMessage` drops a message with neither
+ * text nor attachment, and a video carries NO `msg.text` — so every field
+ * missing from `attachmentOf` was a message swallowed before any binding was
+ * touched. That is what the user reported: "shadok doesn't see videos".
+ */
+test("attachmentOf: a video → kind video, with its length and mime", () => {
+  const att = attachmentOf({
+    caption: "look at the badge",
+    video: { file_id: "v", file_unique_id: "uv", duration: 18, mime_type: "video/mp4", file_size: 1_200_000 },
+  });
+  assert.deepEqual(att, {
+    fileId: "v",
+    fileUniqueId: "uv",
+    kind: "video",
+    fileSize: 1_200_000,
+    mimeType: "video/mp4",
+    durationSec: 18,
+  });
+});
+
+test("attachmentOf: a GIF stays a video, even though Telegram also sends `document`", () => {
+  // Telegram fills BOTH fields for an animation. As a document it would lose
+  // its duration and therefore its storyboard, so `animation` has to win.
+  const att = attachmentOf({
+    animation: { file_id: "a", file_unique_id: "ua", duration: 3, mime_type: "video/mp4" },
+    document: { file_id: "a", file_unique_id: "ua", mime_type: "video/mp4", file_name: "giphy.mp4" },
+  });
+  assert.equal(att?.kind, "video");
+  assert.equal(att?.durationSec, 3);
+});
+
+test("attachmentOf: a round video note is a video too", () => {
+  const att = attachmentOf({ video_note: { file_id: "n", file_unique_id: "un", duration: 7 } });
+  assert.equal(att?.kind, "video");
+});
+
+test("attachmentOf: a video sent as a FILE is still looked at as a video", () => {
+  // No duration in this shape — the probe recovers it from ffmpeg.
+  const att = attachmentOf({
+    document: { file_id: "d", file_unique_id: "ud", mime_type: "video/quicktime", file_name: "demo.mov" },
+  });
+  assert.equal(att?.kind, "video");
+  assert.equal(att?.durationSec, undefined);
+});
+
+test("attachmentOf: an audio file is handed over rather than dropped", () => {
+  // Not transcribed (a 40-minute track would hold the turn hostage), but no
+  // longer invisible.
+  const att = attachmentOf({
+    audio: { file_id: "m", file_unique_id: "um", duration: 190, mime_type: "audio/mpeg", file_name: "memo.mp3" },
+  });
+  assert.equal(att?.kind, "file");
+  assert.equal(att?.fileName, "memo.mp3");
+});
+
+test("attachmentOf: a sticker is still nothing to act on — a decision, not a hole", () => {
+  // A sticker is a reaction. Waking a whole agent turn for an emoji-equivalent
+  // costs more than it tells anyone.
+  assert.equal(attachmentOf({ sticker: { file_id: "s", file_unique_id: "us" } }), null);
+});
+
+test("mediaExtension: a camera video has no name, so the mime decides", () => {
+  assert.equal(mediaExtension({ fileId: "v", fileUniqueId: "uv", kind: "video", mimeType: "video/mp4" }), "mp4");
+  assert.equal(mediaExtension({ fileId: "v", fileUniqueId: "uv", kind: "video", mimeType: "video/quicktime" }), "mov");
+  // Unknown mime, but a video Telegram transcoded itself is mp4 — an
+  // extension-less file reads as "unknown binary".
+  assert.equal(mediaExtension({ fileId: "v", fileUniqueId: "uv", kind: "video" }), "mp4");
+  assert.equal(mediaExtension({ fileId: "f", fileUniqueId: "uf", kind: "file" }), null);
+});
+
+test("mediaFileName: an unnamed video lands as .mp4, not as a bare id", () => {
+  assert.equal(
+    mediaFileName({ fileId: "v", fileUniqueId: "AQAD", kind: "video", mimeType: "video/mp4" }),
+    "AQAD.mp4",
+  );
+});
+
+test("attachmentPrompt: a video comes with its stills AND the line that says to read them", () => {
+  // Load-bearing wording: handed only a path and some images, a model answers
+  // that it cannot watch videos and never opens the stills.
+  const out = attachmentPrompt(
+    [
+      {
+        path: "/m/AQAD.mp4",
+        kind: "video",
+        durationSec: 18,
+        frames: [
+          { path: "/m/AQAD-f1.jpg", atSec: 2.25 },
+          { path: "/m/AQAD-f2.jpg", atSec: 6.75 },
+        ],
+        transcript: "watch the badge when I switch tabs",
+      },
+    ],
+    "look at the badge",
+  );
+  assert.equal(
+    out,
+    [
+      "[Attached video: /m/AQAD.mp4 (0:18)]",
+      "Stills from it — read these images to see the video:",
+      "[Attached image: /m/AQAD-f1.jpg] frame 1/2 at 0:02",
+      "[Attached image: /m/AQAD-f2.jpg] frame 2/2 at 0:07",
+      '⟦heard in the video⟧ "watch the badge when I switch tabs"',
+      "look at the badge",
+    ].join("\n"),
+  );
+});
+
+test("attachmentPrompt: audio nobody listened to is NAMED, silence says nothing", () => {
+  // An agent told nothing about the sound concludes there was none.
+  const unheard = attachmentPrompt([
+    { path: "/m/a.mp4", kind: "video", durationSec: 400, audioNote: "this clip has sound, not transcribed." },
+  ]);
+  assert.match(unheard, /⟦video audio⟧ this clip has sound, not transcribed\./);
+  // A silent clip carries neither line.
+  const silent = attachmentPrompt([{ path: "/m/b.mp4", kind: "video", durationSec: 5 }]);
+  assert.equal(silent, "[Attached video: /m/b.mp4 (0:05)]");
+});
+
+test("attachmentPrompt: a photo and a file are untouched by all this", () => {
+  assert.equal(
+    attachmentPrompt([{ path: "/m/a.jpg", kind: "image" }, { path: "/m/b.zip", kind: "file" }]),
+    "[Attached image: /m/a.jpg]\n[Attached file: /m/b.zip]",
+  );
+});
+
+test("the 20 MB ceiling is named as a ceiling, not as a failure", () => {
+  const att = { fileId: "v", fileUniqueId: "uv", kind: "video" as const, fileSize: 34_000_000 };
+  assert.ok(tooBigFor(att, new Error("file too large (Telegram bot limit: 20 MB)")));
+  // Telegram's own wording, for a file it never sized.
+  assert.ok(tooBigFor({ fileId: "v", fileUniqueId: "uv", kind: "video" }, { message: "file is too big" }));
+  // A real failure must keep its own message.
+  assert.equal(tooBigFor({ fileId: "v", fileUniqueId: "uv", kind: "video" }, new Error("download HTTP 502")), false);
+  const notice = tooLargeNotice(att);
+  assert.match(notice, /20 MB/);
+  assert.match(notice, /34\.0 MB/);
+  assert.match(notice, /video/);
 });

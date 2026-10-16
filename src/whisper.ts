@@ -136,11 +136,28 @@ export function parseWhisperText(stdout: string): string {
   return String(stdout ?? "")
     .split("\n")
     .map((l) => l.replace(/^\s*\[[0-9:.\s\->]+\]\s*/, "").trim())
-    .filter((l) => l && !/^\[.*\]$/.test(l))
+    // A line that is NOTHING BUT a sound tag is not speech. whisper.cpp writes
+    // those in brackets AND in parentheses — `[MUSIC]`, `(Bell)`, `(wind
+    // blowing)` — and a 440 Hz tone really did come back as `(Bell)`, which
+    // the video path would have quoted to the agent as something that was said.
+    // Only a whole-line tag goes: "(laughs) yes, ship it" is speech.
+    .filter((l) => l && !/^[[(][^[\]()]*[\])]$/.test(l))
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
 }
+
+/**
+ * Why there is no text, not merely that there is none.
+ *
+ * A voice note shows the same notice either way, but a VIDEO must not: "I
+ * understood nothing in that voice message" is wrong twice over for a silent
+ * screen recording nobody asked to be transcribed. `empty` is a fact about the
+ * audio, `failed`/`unavailable` are faults on our side.
+ */
+export type TranscriptionResult =
+  | { ok: true; text: string }
+  | { ok: false; kind: "empty" | "failed" | "unavailable"; notice: string };
 
 /**
  * Pure: what to do with a transcription.
@@ -149,9 +166,9 @@ export function parseWhisperText(stdout: string): string {
  * message that produced nothing must say so, or it is indistinguishable from
  * the silent drop this whole feature exists to remove.
  */
-export function transcriptionOutcome(text: string): { ok: true; text: string } | { ok: false; notice: string } {
+export function transcriptionOutcome(text: string): TranscriptionResult {
   const t = parseWhisperText(text);
-  if (!t) return { ok: false, notice: "🎙 je n'ai rien compris dans ce vocal — peux-tu réessayer ou écrire ?" };
+  if (!t) return { ok: false, kind: "empty", notice: "🎙 je n'ai rien compris dans ce vocal — peux-tu réessayer ou écrire ?" };
   return { ok: true, text: t };
 }
 
@@ -239,6 +256,8 @@ export function whisperState(): WhisperState | null {
 export function resetWhisper(): void {
   inFlight = null;
   settled = null;
+  ffInFlight = null;
+  ffSettled = null;
 }
 
 import { execFile, execFileSync } from "node:child_process";
@@ -284,6 +303,48 @@ async function installPkg(pkg: string): Promise<void> {
   await run(cmd, args as string[], { timeout: 900_000 });
 }
 
+export type FfmpegState = { kind: "ready"; ffmpeg: string } | { kind: "unavailable"; reason: string };
+
+let ffInFlight: Promise<FfmpegState> | null = null;
+let ffSettled: FfmpegState | null = null;
+
+/** Said once, before the first byte moves: a download nobody announced looks
+ *  like a bot that stopped answering. */
+export const FFMPEG_NOTICE = "🎬 first time: fetching the video toolchain (~80 MB), one moment.";
+
+/**
+ * The static ffmpeg alone — no cmake, no whisper build, no 600 MB model.
+ *
+ * Split out of `ensureWhisper` because the video path needs ONLY this: stills
+ * from a silent clip must not cost a speech-to-text install. Single-flight and
+ * sticky-on-failure for the same reasons stated there, and it is now the one
+ * place that writes `ffmpeg` — `ensureWhisper` goes through it too.
+ */
+export async function ensureFfmpeg(notify?: (line: string) => void): Promise<FfmpegState> {
+  if (ffSettled) return ffSettled;
+  if (ffInFlight) return ffInFlight;
+  ffInFlight = (async (): Promise<FfmpegState> => {
+    const p = whisperPaths(whisperDir());
+    try {
+      if (!fs.existsSync(p.ffmpeg)) {
+        const url = ffmpegAsset(process.platform, process.arch);
+        if (!url) throw new Error(`no static ffmpeg for ${process.platform}/${process.arch}`);
+        notify?.(FFMPEG_NOTICE);
+        await fs.promises.mkdir(p.dir, { recursive: true });
+        await fetchTo(url, p.ffmpeg, 0o755);
+      }
+      ffSettled = { kind: "ready", ffmpeg: p.ffmpeg };
+      console.log(`ffmpeg: ready (${p.ffmpeg})`);
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      ffSettled = { kind: "unavailable", reason };
+      console.log(`ffmpeg: unavailable — ${reason}`);
+    }
+    return ffSettled;
+  })().finally(() => { ffInFlight = null; });
+  return ffInFlight;
+}
+
 /**
  * Provision everything, once. Returns the same answer to every later caller.
  *
@@ -310,9 +371,11 @@ export async function ensureWhisper(notify?: (line: string) => void): Promise<Wh
 
       if (!present.cmake) await installPkg("cmake");
       if (!present.ffmpeg) {
-        const url = ffmpegAsset(process.platform, process.arch);
-        if (!url) throw new Error(`no static ffmpeg for ${process.platform}/${process.arch}`);
-        await fetchTo(url, p.ffmpeg, 0o755);
+        // Through the SAME single-flight as the video path: two provisioners
+        // writing `${dest}.part-${pid}` from one pid is the ENOTEMPTY-shaped
+        // race this file already pays for once.
+        const ff = await ensureFfmpeg();
+        if (ff.kind !== "ready") throw new Error(ff.reason);
       }
       if (!present.whisper) {
         const tgz = path.join(dir, `whisper-${WHISPER_TAG}.tar.gz`);
@@ -360,9 +423,9 @@ export async function ensureWhisper(notify?: (line: string) => void): Promise<Wh
 export async function transcribe(
   audioPath: string,
   notify?: (line: string) => void,
-): Promise<{ ok: true; text: string } | { ok: false; notice: string }> {
+): Promise<TranscriptionResult> {
   const state = await ensureWhisper(notify);
-  if (state.kind !== "ready") return { ok: false, notice: installFailure(state.reason) };
+  if (state.kind !== "ready") return { ok: false, kind: "unavailable", notice: installFailure(state.reason) };
   const wav = `${audioPath}.16k.wav`;
   try {
     await run(state.ffmpeg, ["-nostdin", "-y", "-i", audioPath, "-ar", "16000", "-ac", "1", "-f", "wav", wav],
@@ -371,7 +434,7 @@ export async function transcribe(
       { timeout: 600_000, maxBuffer: 1 << 24 });
     return transcriptionOutcome(stdout);
   } catch (e) {
-    return { ok: false, notice: `🎙 la transcription a échoué : ${e instanceof Error ? e.message.slice(0, 200) : e}` };
+    return { ok: false, kind: "failed", notice: `🎙 la transcription a échoué : ${e instanceof Error ? e.message.slice(0, 200) : e}` };
   } finally {
     await fs.promises.rm(wav, { force: true }).catch(() => {});
   }
