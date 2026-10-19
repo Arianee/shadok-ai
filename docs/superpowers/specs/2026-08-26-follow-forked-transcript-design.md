@@ -107,3 +107,43 @@ Linux-only, so macOS got nothing. The content signal above has neither problem.
   sibling ignored, quiet no-op. Full suite green (693).
 - Ground truth: field semantics confirmed on TWO instances (a real fork pair
   + a normal session on shadok-self, where root == own id).
+
+## 2026-10-19 — a fork is left, the session's own transcript never is
+
+Found in production, on an agent whose chat had been silent **live** for over an
+hour while every page reload showed the conversation perfectly, and whose
+siblings on the same instance were fine.
+
+The measurement that named it: the tail's stored position sat at 51.78 MB on
+`<fork>.jsonl` (= that file's full size, nothing left to read) while
+`<own-id>.jsonl` grew past 56 MB, 3.5 MB of it written after the tail last
+advanced. The agent had gone back to writing its ORIGINAL transcript, and the
+tail was reading a file nothing appends to any more.
+
+Two things put it there, and the second is what made it permanent.
+
+- A context overflow forked the transcript, and the tail followed — working as
+  designed.
+- `--resume` brings a session back to its OWN id. Every restart respawns that
+  way (`restartSession`), so Claude Code starts appending to the original file
+  again and the fork becomes the dead one. But the own id was in the `seen` set
+  by then, and `seen` is one-way: the tail could never come back.
+
+The symptom is worth stating, because it is what a user actually reports and it
+names no subsystem: **live is broken, reload is fine, and only this agent**.
+Everything live (the chat) comes from the tail; everything replayed comes from
+`loadHistory`, which is keyed by the channel's own session id — so the two read
+different files and only one of them is the live one.
+
+Both halves are now closed:
+
+- `detectFork` takes an `ownId` that the `seen` exclusion does not cover. Anti-flap
+  still holds for every other id; the session's own transcript is never abandoned
+  for good.
+- `restartSession` clears the whole fork trail (`tailId` / `tailSeen` / `rootId`)
+  before respawning, since the process it spawns resumes `s.id` by construction.
+
+One trap in the fix: coming home must NOT `seedTailPos(file, 0)`. Seeding 0 is
+right for a fork (never shown in chat), and would have dumped a 56 MB transcript
+into the chat here. Home keeps its stored position, which `startOffset` caps via
+`MAX_CATCHUP` anyway.

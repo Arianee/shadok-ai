@@ -2926,6 +2926,12 @@ async function restartSession(s: Live): Promise<void> {
   s.busy = false;
   s.lastScreen = "";
   s.lastDialogKey = null;
+  // The respawn below resumes `s.id`, so Claude Code writes that transcript
+  // again: any fork this session was following is now the dead one. Forget the
+  // whole fork trail, or the tail keeps reading a file nothing appends to.
+  s.tailId = undefined;
+  s.tailSeen = undefined;
+  s.rootId = undefined;
   broadcast(s, { type: "working", startedAt: Date.now(), elapsedMs: 0 });
   // Resume only if there's a transcript; a never-used session has
   // nothing to resume (claude --resume would exit) — re-create it.
@@ -3284,18 +3290,32 @@ function maybeFollowFork(s: Live): void {
   // when the file has no root record yet (a session that never took a turn).
   const myRoot = (s.rootId ??= rootIdOfFile(myFile) ?? s.id);
   const seen = (s.tailSeen ??= new Set([tailId]));
-  const target = detectFork(myFile, tailId, myRoot, seen);
+  // `s.id` is passed so the hunt can come HOME: every restart respawns with
+  // `--resume <s.id>`, so the session's own transcript becomes the live file
+  // again, and excluding it as a visited fork left the tail on a dead one for
+  // good (see `detectFork`).
+  const target = detectFork(myFile, tailId, myRoot, seen, s.id);
   if (!target) return;
-  console.log(`[sk-${s.id.slice(0, 8)}] transcript forked → following ${target.slice(0, 8)} (context overflow)`);
+  const home = target === s.id;
+  console.log(
+    home
+      ? `[sk-${s.id.slice(0, 8)}] back on its own transcript (the fork ${tailId.slice(0, 8)} went quiet)`
+      : `[sk-${s.id.slice(0, 8)}] transcript forked → following ${target.slice(0, 8)} (context overflow)`,
+  );
   seen.add(tailId);
   s.tailId = target;
-  // None of the new file was ever shown in chat (it is a different transcript),
-  // so replay it from the start rather than from EOF.
-  seedTailPos(sessionFilePath(s.cwd, target), 0);
+  // None of a FORK was ever shown in chat (it is a different transcript), so it
+  // is replayed from the start. Coming home is the opposite case: that file has
+  // a stored position and a history the chat already replayed, and seeding 0
+  // would dump the whole transcript — 56 MB on the session this was found on —
+  // into the chat. Let `startOffset` resume from the stored position instead.
+  if (!home) seedTailPos(sessionFilePath(s.cwd, target), 0);
   startContentTail(s);
   broadcast(s, {
     type: "stream-text",
-    text: "— la session précédente était pleine ; le chat s'est reconnecté à la session en cours de l'agent —",
+    text: home
+      ? "— reconnected to this agent's own session —"
+      : "— the previous session was full; the chat reconnected to the agent's current one —",
     at: Date.now(),
   });
 }

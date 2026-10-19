@@ -108,9 +108,17 @@ export function detectFork(
   tailId: string,
   myRoot: string,
   /** Ids we have already tailed and left. A dead transcript's mtime should never
-   *  advance, but if it ever did (an external touch, a manual resume) we must not
-   *  oscillate back onto it — so a followed id is excluded from then on. */
+   *  advance, but if it ever did (an external touch) we must not oscillate back
+   *  onto it — so a followed id is excluded from then on. */
   seen: ReadonlySet<string> = new Set(),
+  /** The session's OWN transcript id, which that exclusion must NOT cover.
+   *  Leaving a fork is one-way for an arbitrary id, but never for this one: a
+   *  resume (`--resume <ownId>`, which is how every restart respawns) makes
+   *  Claude Code append to that very file again, so it becomes the live
+   *  transcript a second time. Treating it like any other visited fork pinned
+   *  the tail to a dead one for good — nothing streamed, the chat was silent
+   *  live and perfect on every reload, and no restart could recover it. */
+  ownId?: string,
 ): string | null {
   let myMtime: number;
   try {
@@ -128,7 +136,7 @@ export function detectFork(
   const candidates: { id: string; mtime: number; root: string | null }[] = [];
   for (const name of names) {
     const id = idFromTranscriptName(name);
-    if (!id || id === tailId || seen.has(id)) continue;
+    if (!id || id === tailId || (seen.has(id) && id !== ownId)) continue;
     const f = path.join(dir, name);
     let mtime: number;
     try {
