@@ -987,6 +987,25 @@
     font-family: var(--sans);
     font-size: 14px;
   }
+  /*
+   * The SAME reset, written again at a specificity that beats
+   * `.turn.claude .bubble` (three classes against this rule's two). Without it
+   * the reset above was lost in silence on the one turn that needs it most: an
+   * agent's answer kept the TUI-oriented `pre-wrap`, and since `marked` emits a
+   * newline between every block tag, each of those newlines rendered as a blank
+   * LINE — one before a list, one between every item, one between paragraphs.
+   * Measured on a live answer: 486px tall, 276px once reset, so 43% of the
+   * bubble was whitespace that is not in the text. `font-family`/`font-size`
+   * are deliberately NOT raised: the chat has always shown answers in the
+   * monospace of its terminal, and that is a look to change on purpose rather
+   * than as a side effect of fixing the spacing. Same lesson as invariant 28 —
+   * a corrective rule that does not match the specificity of the rule it
+   * corrects does nothing, and says nothing.
+   */
+  .turn.claude .bubble.md {
+    white-space: normal;
+    word-break: break-word;
+  }
   .bubble.md p { margin: 4px 0; }
   .bubble.md p:first-child { margin-top: 0; }
   .bubble.md p:last-child { margin-bottom: 0; }
