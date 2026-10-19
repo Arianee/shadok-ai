@@ -126,11 +126,21 @@ test("detectFork: follows the fork, ignores the sibling, no-ops when quiet", () 
     const forkFile = path.join(dir, `${NEW}.jsonl`);
     assert.equal(detectFork(forkFile, NEW, ROOT), null);
 
-    // anti-flap: if the dead ROOT file were re-touched newer than NEW, we must
-    // NOT oscillate back onto it once it is in the `seen` set
-    writeTranscript(dir, ROOT, ROOT, 12_000_000); // ROOT bumped past NEW
-    assert.equal(detectFork(forkFile, NEW, ROOT), ROOT); // without the guard, it flaps
-    assert.equal(detectFork(forkFile, NEW, ROOT, new Set([ROOT])), null); // guarded
+    // anti-flap: if a dead file we already left were re-touched newer than the
+    // one we tail, we must NOT oscillate back onto it
+    writeTranscript(dir, SIBLING, ROOT, 12_000_000); // same lineage, visited, bumped
+    assert.equal(detectFork(forkFile, NEW, ROOT), SIBLING); // without the guard, it flaps
+    assert.equal(detectFork(forkFile, NEW, ROOT, new Set([SIBLING])), null); // guarded
+
+    // ...but the session's OWN transcript is never abandoned for good: a restart
+    // resumes `--resume <ownId>`, so Claude Code appends to it again and it
+    // becomes the live file. Visited or not, we must come home — otherwise the
+    // tail stays on a frozen fork for ever (nothing streams, every reload is
+    // fine, and no restart recovers it).
+    writeTranscript(dir, ROOT, ROOT, 15_000_000); // the own transcript, live again
+    const visited = new Set([ROOT, SIBLING]);
+    assert.equal(detectFork(forkFile, NEW, ROOT, visited), null); // the old rule: stuck
+    assert.equal(detectFork(forkFile, NEW, ROOT, visited, ROOT), ROOT); // comes home
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
