@@ -70,26 +70,43 @@ export function seedPlan(
   add("hasCompletedOnboarding", true);
   add("lastOnboardingVersion", opts.version);
 
-  // "Resume this conversation? … Resuming it will use about N% of your 5-hour
-  // usage limit." — a BLOCKING single-select (Resume / Start a new
-  // conversation) shown on a Pro/Max plan when a large, idle conversation is
-  // resumed. Every weeks-old shadok agent is one, so a fresh instance would
-  // stall on EVERY resume path until a human answered: `reconcileOnBoot` after
-  // an auto-update, Reload agent, `/reload`, restart-all, `spawn --resume`. A
-  // cron-driven cockpit has nobody to answer it.
+  // `resumeReturnDismissed` gates THREE separate resume-time asks, not one
+  // screen — all three read it and bail out when it is true (2.1.304 bundle).
+  // Do not delete it the day one of them goes away.
   //
-  // The gate, read out of the 2.1.304 bundle: the statsig dynamic config
-  // `tengu_amber_tally` must parse (no config, no dialog), this key must be
-  // falsy, the account must not already be rate-limited, and the resume must
-  // cost >= `minPercent` (default 5) of the 5-hour limit. Two triggers fire
-  // it, `resume` and `idle`.
+  // a) "Resume this conversation? … will use about N% of your 5-hour usage
+  //    limit." — a BLOCKING single-select (Resume / Start a new conversation)
+  //    on a Pro/Max plan. Gate: the statsig config `tengu_amber_tally` must
+  //    parse (no config, no dialog), the account must not already be
+  //    rate-limited, and the resume must cost >= `minPercent` (default 5) of
+  //    the 5-hour limit. Two triggers, `resume` and `idle`.
+  // b) A compact-or-continue ask. Gate: flags `tengu_gleaming_fair` /
+  //    `tengu_gleaming_fair_reuse`, idle >= CLAUDE_CODE_RESUME_THRESHOLD_MINUTES
+  //    (default 70) and size >= CLAUDE_CODE_RESUME_TOKEN_THRESHOLD (default
+  //    100000). Outcomes: compact / continue / dismiss / never — and `compact`
+  //    RUNS a compaction. This is the one that matters most to shadok: every
+  //    weeks-old agent clears 70 minutes and 100k tokens trivially.
+  // c) A model-family announcement, gated on the statsig config
+  //    `tengu_hidden_volcano` ({enabled, form: "line"|"dialog", families,
+  //    maxAsks, minHoursBetween}).
+  // The on-screen wording of (b) and (c) was NOT recovered — the bundle keeps
+  // their UI copy away from the component — so they are described by gate and
+  // action only. Both are identical in 2.1.303 and 2.1.304, i.e. pre-existing;
+  // only (a)'s `offersLookUp` branch is new in 2.1.304.
   //
-  // The trade-off: dismissing it drops a quota signal. shadok already surfaces
-  // that signal itself (`/usage`, the pace guard in `src/pace.ts`), and the
-  // alternative is a dialog on every reload of every large agent.
+  // Unseeded, a fresh instance stalls on EVERY resume path until a human
+  // answers: `reconcileOnBoot` after an auto-update, Reload agent, `/reload`,
+  // restart-all, `spawn --resume`. A cron-driven cockpit has nobody to answer.
   //
-  // TOP-LEVEL, not per project: that is where the CLI writes it. Additive like
-  // the rest — a user who deliberately set `false` wants the warning.
+  // The trade-off: dismissing them drops a quota signal. shadok already
+  // surfaces that signal itself (`/usage`, the pace guard in `src/pace.ts`),
+  // and the alternative is a dialog on every reload of every large agent.
+  //
+  // TOP-LEVEL, not per project: that is where the CLI writes it. ADDITIVE,
+  // unlike `hasTrustDialogAccepted` below, and the reason is verified: the
+  // CLI's only write site sets it to `true`, reached only when the human picks
+  // "never". The CLI never writes `false`, so a `false` can only be a
+  // deliberate hand edit by someone who wants the asks back — respect it.
   add("resumeReturnDismissed", true);
 
   // "Teach auto mode about your environment?" — a BLOCKING form offering to
