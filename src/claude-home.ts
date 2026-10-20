@@ -29,6 +29,8 @@ export interface ClaudeHome {
   /** The auto-mode environment screen's state. `denials` is the CLI's own
    *  counter; `dismissed`/`dismissedAt` are the user's answer. */
   autoModeEnvSetup?: Record<string, unknown>;
+  /** The resume quota dialog's "don't warn me" flag. GLOBAL, never per project. */
+  resumeReturnDismissed?: boolean;
   projects?: Record<string, Record<string, unknown>>;
   [k: string]: unknown;
 }
@@ -67,6 +69,28 @@ export function seedPlan(
   // seeding one would be cargo cult that also implies we control the theme.
   add("hasCompletedOnboarding", true);
   add("lastOnboardingVersion", opts.version);
+
+  // "Resume this conversation? … Resuming it will use about N% of your 5-hour
+  // usage limit." — a BLOCKING single-select (Resume / Start a new
+  // conversation) shown on a Pro/Max plan when a large, idle conversation is
+  // resumed. Every weeks-old shadok agent is one, so a fresh instance would
+  // stall on EVERY resume path until a human answered: `reconcileOnBoot` after
+  // an auto-update, Reload agent, `/reload`, restart-all, `spawn --resume`. A
+  // cron-driven cockpit has nobody to answer it.
+  //
+  // The gate, read out of the 2.1.304 bundle: the statsig dynamic config
+  // `tengu_amber_tally` must parse (no config, no dialog), this key must be
+  // falsy, the account must not already be rate-limited, and the resume must
+  // cost >= `minPercent` (default 5) of the 5-hour limit. Two triggers fire
+  // it, `resume` and `idle`.
+  //
+  // The trade-off: dismissing it drops a quota signal. shadok already surfaces
+  // that signal itself (`/usage`, the pace guard in `src/pace.ts`), and the
+  // alternative is a dialog on every reload of every large agent.
+  //
+  // TOP-LEVEL, not per project: that is where the CLI writes it. Additive like
+  // the rest — a user who deliberately set `false` wants the warning.
+  add("resumeReturnDismissed", true);
 
   // "Teach auto mode about your environment?" — a BLOCKING form offering to
   // scan the user's shell history (PRE-TICKED) and their other repositories.
