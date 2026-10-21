@@ -786,6 +786,17 @@ Design and threat model: `docs/superpowers/specs/2026-10-21-passkey-2fa-design.m
   reset anyone.
 - **The bootstrap admin has no browser session under 2FA.** It is
   `SHADOK_GUI_PASSWORD`, present in every agent's env, and resettable by no one.
+- **The Telegram bridge is the one caller that authenticates with a cookie and
+  is not a person**, and the two rules above between them locked it out: it
+  holds a WS to our own server with `adminCookie()`, so with 2FA on the gate
+  answered 401 and every Telegram message died there — bot still polling, chat
+  silent, nothing in the log. Its cookie now carries `mfa=1` and
+  `currentAccount` recognises it via `isInternalClient` before reaching
+  `cookieAccount`, which keeps refusing the bootstrap admin: Telegram works, the
+  `/2fa/*` and account routes stay person-only (verified: `/live` 200 and `/2fa`
+  403 for that cookie). The flag can only be minted with the signing secret,
+  which no login path uses for the instance password and no agent env carries —
+  an agent's `SHADOK_AUTH` stays `mfa=0`, i.e. refused.
 - The rules are pure and tested: `twoFactorEnableVerdict` (≥ 2 named admins
   with a passkey), `keepsTwoAdminsVerdict` (no deletion/demotion/passkey removal
   that would drop below that), `resetVerdict` (never yourself),
