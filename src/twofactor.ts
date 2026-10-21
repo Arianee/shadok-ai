@@ -242,3 +242,27 @@ export function cleanLabel(label: unknown): string {
 export function publicPasskey(p: Passkey) {
   return { id: p.id, label: p.label, createdAt: p.createdAt, lastUsedAt: p.lastUsedAt ?? null };
 }
+
+/**
+ * Is this session the server's OWN in-process client — the Telegram bridge —
+ * rather than a person?
+ *
+ * The bridge holds a WebSocket to our own server (telegram.ts), authenticated
+ * with a cookie and nothing else, and that cookie is the bootstrap admin's. So
+ * the two rules that make the second factor real — no `mfa` flag, no entry, and
+ * the instance password can never sign in — between them refused the bridge as
+ * well: every Telegram message then died at the gate, with the bot still
+ * long-polling and nothing in the chat to show for it. Measured, not supposed.
+ *
+ * What distinguishes the bridge from a stolen password is the signing secret.
+ * `POST /login` refuses the instance password outright while 2FA is on, so no
+ * browser can ever obtain a bootstrap cookie marked `mfa`; minting one needs
+ * `<key>.key`, which is per instance, 600, and deliberately NEVER exported into
+ * an agent's env (`src/accounts.ts`) — an agent's own `SHADOK_AUTH` carries
+ * `mfa=0` and stays refused. So this flag means "the server itself", and the
+ * caller is a machine: `cookieAccount` still refuses it, which is what keeps
+ * every account and two-factor route for persons only.
+ */
+export function isInternalClient(sess: { user: string; mfa: boolean } | null | undefined): boolean {
+  return !!sess && sess.user === BOOTSTRAP_ADMIN && sess.mfa;
+}

@@ -366,7 +366,7 @@ know before opening it up:
     admin can also hand a member a *device code* directly.
   - While it is on, the instance password (`admin`) **cannot sign in to the
     browser** — it lives in every agent's environment and no one could reset it;
-    use a named account. Agents, Telegram and peers are unaffected (they never use
+    use a named account. Agents, Telegram and peers keep working (they never use
     the login), but account and two-factor management is reserved to a signed-in
     person: an agent's key can no longer create or reset accounts.
   - Passkeys need a **secure context**: `https://` (see "Behind TLS") or

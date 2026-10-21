@@ -21,7 +21,8 @@ Success:
 - with 2FA on, a correct password without the passkey step gets no session;
 - an admin who loses their phone is back in after another admin resets them;
 - adding a laptop from a phone takes one code, no admin involved;
-- agents, Telegram and peers keep working, untouched.
+- agents, Telegram and peers keep working (the bridge is credentialed as the
+  server's own client — see § 3).
 
 ## Threat model — what this does and does not stop
 
@@ -98,7 +99,24 @@ Agents are untouched: they authenticate with `x-shadok-session-key`, never the
 login. `SHADOK_AUTH` (the bootstrap cookie in their env, `mfa=0`) stops working
 under 2FA — every current skill already uses the session key (invariant 33); an
 agent that predates that needs the one reload it already needed.
-Telegram and peers do not go through the login and are unchanged.
+Peers do not go through the login and are unchanged (`x-shadok-peer` is read
+before the cookie). **The Telegram bridge does go through it**, and the first
+version of this spec was wrong to list it with them: the bridge holds a
+WebSocket to our own server authenticated by `adminCookie()` and nothing else,
+so both new rules — no `mfa` flag, no entry; the instance password cannot sign
+in — refused it. Measured on a real instance: with 2FA on, `GET /live` → 401 and
+the WS upgrade → 401, i.e. the bot still long-polling Telegram and every message
+dying at the gate, silently.
+
+The bridge is therefore credentialed as what it is: the server's own client. Its
+cookie is minted `mfa=1` (`adminCookie(true)`), and `currentAccount` recognises
+that shape through `isInternalClient` — BEFORE `cookieAccount`, which still
+refuses the bootstrap admin, so every account and `/2fa/*` route stays reserved
+to a person. The flag is not a privilege granted to a machine: minting it needs
+the signing secret, which `/login` never uses for the instance password and
+which is never exported into an agent's env, so `mfa=1` on a bootstrap cookie
+can only mean "the server itself". An agent's `SHADOK_AUTH` keeps `mfa=0` and
+keeps being refused, as above.
 
 ### 4. Adding a device (from another device)
 

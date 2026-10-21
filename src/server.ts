@@ -221,6 +221,7 @@ import {
   admins2fa,
   authenticationOptions,
   enrollCodeVerdict,
+  isInternalClient,
   keepsTwoAdminsVerdict,
   loginNext,
   newEnrollCode,
@@ -336,9 +337,19 @@ const SESSION_TTL_MS = 7 * 24 * 3600 * 1000;
 // never creates a key file it will not use.
 let sessionKeyCache: Buffer | null = null;
 const signingSecret = (): Buffer => (sessionKeyCache ??= sessionSecret());
-/** The Telegram bridge and the agents authenticate as the bootstrap admin. */
-const adminCookie = (): string | undefined =>
-  GUI_PASSWORD ? `sk_auth=${signSession(BOOTSTRAP_ADMIN, Date.now(), signingSecret())}` : undefined;
+/**
+ * The Telegram bridge and the agents authenticate as the bootstrap admin.
+ *
+ * `mfa` marks the cookie as second-factor verified. The BRIDGE gets it and an
+ * agent does not, and that is not a privilege, it is what the flag means:
+ * minting it takes the signing secret, which never leaves the server, so a
+ * cookie carrying it IS the server (`isInternalClient`). An agent's
+ * `SHADOK_AUTH` is a dated token sitting in a process env, which under 2FA must
+ * read as what it is — a password-grade credential, not a second factor. Agents
+ * lose nothing: they authenticate with `x-shadok-session-key`.
+ */
+const adminCookie = (mfa = false): string | undefined =>
+  GUI_PASSWORD ? `sk_auth=${signSession(BOOTSTRAP_ADMIN, Date.now(), signingSecret(), mfa)}` : undefined;
 
 // The live Telegram bridge handle + the port we actually bound, so the
 // /telegram endpoint can tear it down and recreate it hot (no server restart).
@@ -348,7 +359,10 @@ let tgBridge: TelegramHandle = {
   status: () => ({ username: null, tokenError: null }),
 };
 let boundPort = 0;
-const tgCookie = adminCookie;
+// The bridge is in-process and reaches us over the loopback WS: it is the
+// server's own client, so its cookie says so. Without that, switching 2FA on
+// refused it at the gate and Telegram went silent.
+const tgCookie = (): string | undefined => adminCookie(true);
 
 /**
  * Start the instance's lead agent when it has no channel at all.
@@ -834,6 +848,11 @@ function cookieToken(cookieHeader: string | undefined): string | null {
   const m = /(?:^|;\s*)sk_auth=([^;]+)/.exec(cookieHeader ?? "");
   return m ? decodeURIComponent(m[1]) : null;
 }
+/** The session a request's cookie carries, verified, or null. */
+function cookieSession(req: { headers: Record<string, unknown> }): { user: string; mfa: boolean } | null {
+  const tok = cookieToken(req.headers.cookie as string | undefined);
+  return tok ? readSessionFull(tok, signingSecret(), Date.now(), SESSION_TTL_MS) : null;
+}
 /**
  * Who this request is, or null. Re-reads the account file every time, so
  * deleting an account or changing a role takes effect at once — that is what
@@ -864,6 +883,9 @@ function currentAccount(req: { headers: Record<string, unknown> }): { name: stri
   // principal that `peerName`/the `peer-scope` checks handle.
   const prow = peerRow(req);
   if (prow && peerScope(prow) === "member") return { name: prow.name, role: "member" };
+  // The server's own in-process client (the Telegram bridge) — a machine, not a
+  // person, so it is recognised HERE and stays refused by `cookieAccount`.
+  if (isInternalClient(cookieSession(req))) return { name: BOOTSTRAP_ADMIN, role: "admin" };
   return cookieAccount(req);
 }
 
@@ -885,9 +907,7 @@ function twoFactorOn(): boolean {
  */
 function cookieAccount(req: { headers: Record<string, unknown> }): { name: string; role: Role } | null {
   if (!GUI_PASSWORD) return { name: BOOTSTRAP_ADMIN, role: "admin" };
-  const tok = cookieToken(req.headers.cookie as string | undefined);
-  if (!tok) return null;
-  const sess = readSessionFull(tok, signingSecret(), Date.now(), SESSION_TTL_MS);
+  const sess = cookieSession(req);
   if (!sess) return null;
   const tfa = twoFactorOn();
   if (tfa && !sess.mfa) return null;

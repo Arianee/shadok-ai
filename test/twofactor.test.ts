@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHmac } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { BOOTSTRAP_ADMIN, readSession, readSessionFull, signSession, type Account } from "../src/accounts.js";
 import {
   ENROLL_TTL_MS,
@@ -8,6 +11,7 @@ import {
   admins2fa,
   cleanLabel,
   enrollCodeVerdict,
+  isInternalClient,
   keepsTwoAdminsVerdict,
   loginNext,
   newEnrollCode,
@@ -167,4 +171,46 @@ test("label: control characters and markup stripped, length capped, never empty"
   assert.equal(cleanLabel("<b>Mac</b>\n"), "bMac/b");
   assert.equal(cleanLabel(""), "passkey");
   assert.equal(cleanLabel("x".repeat(99)).length, 40);
+});
+
+// ── The server's own client (the Telegram bridge) ─────────────────────────────
+
+test("internal client: the bridge's cookie is the server, an agent's is not", () => {
+  const secret = createHmac("sha256", "k").update("s").digest();
+  const now = Date.now();
+  // `adminCookie(true)` — minted in-process, the only way to get this shape.
+  const bridge = readSessionFull(signSession(BOOTSTRAP_ADMIN, now, secret, true), secret, now, 60_000);
+  assert.equal(isInternalClient(bridge), true);
+  // `adminCookie()` — what an agent carries in SHADOK_AUTH, and what a
+  // pre-2FA cookie reads as: password-grade, never a second factor.
+  const agent = readSessionFull(signSession(BOOTSTRAP_ADMIN, now, secret), secret, now, 60_000);
+  assert.equal(isInternalClient(agent), false);
+  // A PERSON who passed their passkey is not the server, whatever the flag.
+  const person = readSessionFull(signSession("ada", now, secret, true), secret, now, 60_000);
+  assert.equal(isInternalClient(person), false);
+  assert.equal(isInternalClient(null), false);
+  // An expired or forged cookie never gets this far: it reads as null.
+  assert.equal(isInternalClient(readSessionFull(signSession(BOOTSTRAP_ADMIN, now - 120_000, secret, true), secret, now, 60_000)), false);
+});
+
+/**
+ * A scan test, like `test/ws-url.test.ts`: the wiring it locks lives in
+ * `server.ts`, which cannot be imported without starting a server.
+ *
+ * Why it earns one: `const tgCookie = adminCookie` is the obvious spelling, it
+ * is what the bridge had for as long as there was a bridge, and it is correct
+ * until the day 2FA exists — then it silently takes Telegram off the air, with
+ * the bot still receiving messages and nothing in the log. That is a line a
+ * later cleanup would happily restore.
+ */
+test("the Telegram bridge's cookie is minted as the server's own (mfa)", () => {
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "server.ts"), "utf8");
+  assert.match(src, /const tgCookie = \(\): string \| undefined => adminCookie\(true\);/);
+  // And it must be recognised BEFORE `cookieAccount`, which keeps refusing the
+  // bootstrap admin — that ordering is what keeps `/2fa*` for persons only.
+  const internal = src.indexOf("isInternalClient(cookieSession(req))");
+  const cookieAcct = src.indexOf("return cookieAccount(req);");
+  assert.ok(internal > 0 && cookieAcct > internal, "currentAccount must consult isInternalClient first");
+  // An agent's env token stays password-grade: no flag.
+  assert.match(src, /env\.SHADOK_AUTH = adminCookie\(\)!/);
 });
